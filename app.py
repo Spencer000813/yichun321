@@ -19,8 +19,8 @@ from linebot.exceptions import InvalidSignatureError
 TZ = pytz.timezone("Asia/Taipei")
 app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("EMe9Ii/gE73fpaQjjqlOL6yXDwYReB2snhR6/wFuhv/jcG+AMoKO0y90HYBNtTPpgF6glocNn3H6FrVLJjqlc0AW+WEfpSct5eQDPj8AmS4KNH1dZR9BSMFtD23Ydh93ESETNSY9UhtXJOSTRar7MAdB04t89/1O/w1cDnyilFU=")
-LINE_CHANNEL_SECRET = os.getenv("417cd1ae11247b47d45b9825987e1b2e")
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     raise ValueError("請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET")
