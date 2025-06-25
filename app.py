@@ -25,6 +25,11 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")  # Google Sheets 的 ID
 # 時區設定
 TZ = pytz.timezone('Asia/Taipei')
 
+# 從環境變數載入憑證並初始化 Google Sheets 連接
+credentials = json.loads(os.environ['GOOGLE_CREDENTIALS'])
+gc = gspread.service_account_from_dict(credentials)
+sheet = gc.open_by_key(os.environ.get('SPREADSHEET_ID', 'your_google_sheet_id')).sheet1
+
 class ScheduleManager:
     def __init__(self):
         self.setup_google_sheets()
@@ -32,13 +37,10 @@ class ScheduleManager:
     def setup_google_sheets(self):
         """設定 Google Sheets 連接"""
         try:
-            credentials_dict = json.loads(GOOGLE_CREDENTIALS)
-            creds = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/spreadsheets']
-            )
-            self.gc = gspread.authorize(creds)
-            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+            # 使用全域的 gc 和 sheet 變數
+            global gc, sheet
+            self.gc = gc
+            self.sheet = sheet
             
             # 確保表頭存在
             headers = ['日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID']
@@ -46,6 +48,22 @@ class ScheduleManager:
                 self.sheet.insert_row(headers, 1)
         except Exception as e:
             print(f"Google Sheets 連接失敗: {e}")
+            # 如果全域連接失敗，嘗試原有的連接方式作為備援
+            try:
+                credentials_dict = json.loads(GOOGLE_CREDENTIALS)
+                creds = Credentials.from_service_account_info(
+                    credentials_dict,
+                    scopes=['https://www.googleapis.com/auth/spreadsheets']
+                )
+                self.gc = gspread.authorize(creds)
+                self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+                
+                # 確保表頭存在
+                headers = ['日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID']
+                if not self.sheet.row_values(1):
+                    self.sheet.insert_row(headers, 1)
+            except Exception as backup_error:
+                print(f"備援 Google Sheets 連接也失敗: {backup_error}")
     
     def add_schedule(self, date_str, time_str, content, user_id, reminder=None):
         """新增行程到 Google Sheets"""
