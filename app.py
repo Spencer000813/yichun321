@@ -33,7 +33,7 @@ SERVICE_ACCOUNT_INFO = json.loads(os.getenv("GOOGLE_CREDENTIALS_JSON"))
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
 gc = gspread.authorize(credentials)
-sheet = gc.open_by_key(os.getenv("1mQODCqq5Kont66zp1M8_xXnzPSeP4osZcRlk9WAWRn8")).sheet1
+sheet = gc.open_by_key(os.getenv("SPREADSHEET_ID")).sheet1
 
 # === 寫入行程到 Google Sheet ===
 def add_schedule(date_str, time_str, content, user_id):
