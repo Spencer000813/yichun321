@@ -28,7 +28,7 @@ TZ = pytz.timezone('Asia/Taipei')
 # 從環境變數載入憑證並初始化 Google Sheets 連接
 credentials = json.loads(os.environ['GOOGLE_CREDENTIALS'])
 gc = gspread.service_account_from_dict(credentials)
-sheet = gc.open_by_key(os.environ.get('SPREADSHEET_ID', 'your_google_sheet_id')).sheet1
+sheet = gc.open_by_key(os.environ.get('SPREADSHEET_ID', '1mQODCqq5Kont66zp1M8_xXnzPSeP4osZcRlk9WAWRn8')).sheet1
 
 class ScheduleManager:
     def __init__(self):
