@@ -123,7 +123,7 @@ def friday_reminder():
                 continue
 
         for uid, items in user_schedules.items():
-            msg = "🔔 兩週後的行程提醒：\n\n"
+            msg = f"🔔 兩週後（{future_date.strftime('%Y/%m/%d')}）的行程提醒：\n\n"
             for s in items:
                 msg += f"📅 {s['日期']} {s['時間']}\n📝 {s['行程內容']}\n\n"
             try:
