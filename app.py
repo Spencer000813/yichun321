@@ -602,4 +602,260 @@ def handle_message(event):
                 reply_text = ("❌ 格式錯誤！支援以下格式：\n\n"
                              "📝 快速輸入：\n"
                              "• 今天10點開會\n"
-                             "• 明天下午2點聚
+                             "• 明天下午2點聚餐\n"
+                             "• 後天上午9點會議\n"
+                             "• 7/14 10:00 開會\n"
+                             "• 7/14 聚餐\n"
+                             "• 6月30號 下午2點 盤點\n"
+                             "• 12月25號 聖誕節\n\n"
+                             "📝 完整格式：\n"
+                             "• 新增行程 2024-12-25 09:30 會議\n"
+                             "• 新增行程 2024-12-25 聖誕節")
+        
+        # 刪除行程功能
+        elif text.startswith("刪除行程"):
+            content = text.replace('刪除行程', '').strip()
+            if content:
+                parts = content.split(' ', 1)
+                if len(parts) >= 2:
+                    date_part = parts[0]
+                    keyword = parts[1]
+                    
+                    try:
+                        if '/' in date_part:
+                            month, day = date_part.split('/')
+                            current_year = datetime.now().year
+                            date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                        elif '月' in date_part and ('號' in date_part or '日' in date_part):
+                            match = re.match(r'(\d{1,2})月(\d{1,2})[號日]', date_part)
+                            if match:
+                                month, day = match.groups()
+                                current_year = datetime.now().year
+                                date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                            else:
+                                date_str = date_part
+                        else:
+                            date_str = date_part
+                        
+                        success = schedule_manager.delete_schedule(user_id, date_str, keyword)
+                        if success:
+                            reply_text = f"✅ 已成功刪除包含「{keyword}」的行程"
+                        else:
+                            reply_text = f"❌ 找不到符合條件的行程：{date_str} {keyword}"
+                    except:
+                        reply_text = "❌ 日期格式錯誤，請使用：刪除行程 7/14 關鍵字"
+                else:
+                    reply_text = "❌ 格式錯誤，請使用：刪除行程 7/14 關鍵字"
+            else:
+                reply_text = "❌ 請輸入要刪除的行程，格式：刪除行程 7/14 關鍵字"
+        
+        # 幫助訊息
+        elif text in ["幫助", "help", "使用說明", "功能"]:
+            reply_text = ("🤖 LINE Bot 行程管理系統\n\n"
+                         "📝 新增行程（支援多種格式）：\n"
+                         "• 今天10點開會\n"
+                         "• 明天下午2點聚餐\n"
+                         "• 後天上午9點會議\n"
+                         "• 7/14 10:00 開會\n"
+                         "• 7/14 聚餐\n"
+                         "• 6月30號 下午2點 盤點\n"
+                         "• 12月25號 聖誕節\n"
+                         "• 新增行程 2024-12-25 09:30 會議\n\n"
+                         "🔍 查詢行程：\n"
+                         "• 今日行程\n"
+                         "• 明日行程\n"
+                         "• 本週行程 / 下週行程\n"
+                         "• 本月行程 / 下個月行程\n"
+                         "• 明年行程\n"
+                         "• 近期行程\n\n"
+                         "🗑️ 刪除行程：\n"
+                         "• 刪除行程 7/14 關鍵字\n\n"
+                         "⏰ 倒數計時：\n"
+                         "• 倒數 5 分鐘\n\n"
+                         "📢 系統會在每週五早上10點推播兩週後的行程提醒")
+        
+        # 系統狀態查詢
+        elif text in ["狀態", "系統狀態", "status"]:
+            try:
+                if USE_GOOGLE_SHEETS and schedule_manager.sheet:
+                    test_records = schedule_manager.sheet.get_all_records()
+                    sheets_status = "✅ 正常"
+                    total_records = len([r for r in test_records if r.get('行程內容')])
+                    user_records = len([r for r in test_records if r.get('LINE用戶ID') == user_id and r.get('狀態') != '已刪除'])
+                else:
+                    sheets_status = "📱 記憶體模式"
+                    total_records = len([r for r in memory_storage if r.get('行程內容')])
+                    user_records = len([r for r in memory_storage if r.get('LINE用戶ID') == user_id and r.get('狀態') != '已刪除'])
+            except:
+                sheets_status = "❌ 異常"
+                total_records = 0
+                user_records = 0
+            
+            reply_text = (f"🔧 系統狀態報告\n\n"
+                         f"📊 資料儲存: {sheets_status}\n"
+                         f"📈 總行程數: {total_records}\n"
+                         f"👤 您的行程數: {user_records}\n"
+                         f"🕐 系統時間: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
+                         f"🌏 時區: Asia/Taipei")
+        
+        # 倒數計時格式錯誤提醒
+        elif text.startswith("倒數"):
+            reply_text = "❌ 請輸入正確格式：倒數 X 分鐘，例如：倒數 5 分鐘（1-60分鐘）"
+        
+        # 未知指令
+        else:
+            reply_text = ("🤔 我不太理解您的指令\n\n"
+                         "請輸入「幫助」查看使用說明，或直接輸入行程資訊\n"
+                         "例如：今天10點開會、7/14 聚餐")
+        
+        # 發送回覆
+        reply_message = TextMessage(text=reply_text)
+        line_bot_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[reply_message]
+            )
+        )
+    
+    except Exception as e:
+        error_msg = f"處理訊息時發生錯誤: {str(e)}"
+        logger.error(error_msg)
+        try:
+            error_reply = TextMessage(text="系統發生異常，請稍後再試或聯繫管理員")
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[error_reply]
+                )
+            )
+        except:
+            pass
+
+def friday_reminder():
+    """週五早上10點推播兩週後行程"""
+    try:
+        schedules_by_user = schedule_manager.get_two_weeks_later_schedules()
+        
+        if not schedules_by_user:
+            logger.info("週五提醒：沒有用戶有兩週後的行程")
+            return
+        
+        for user_id, schedules in schedules_by_user.items():
+            if schedules:
+                message = "🔔 兩週後行程提醒\n\n"
+                current_date = None
+                
+                for schedule in schedules:
+                    date = schedule.get('日期', '')
+                    time = schedule.get('時間', '') or '全天'
+                    content = schedule.get('行程內容', '')
+                    
+                    if date != current_date:
+                        if current_date is not None:
+                            message += "\n"
+                        current_date = date
+                        
+                        try:
+                            date_obj = datetime.strptime(date, '%Y-%m-%d')
+                            weekday = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
+                            formatted_date = f"{date_obj.month}/{date_obj.day} (週{weekday})"
+                            message += f"📅 {formatted_date}\n"
+                        except:
+                            message += f"📅 {date}\n"
+                    
+                    if time != '全天':
+                        message += f"   ⏰ {time} - {content}\n"
+                    else:
+                        message += f"   📝 {content} (全天)\n"
+                
+                try:
+                    push_message = TextMessage(text=message.strip())
+                    line_bot_api.push_message(
+                        PushMessageRequest(
+                            to=user_id,
+                            messages=[push_message]
+                        )
+                    )
+                    logger.info(f"成功推播週五提醒給用戶: {user_id}")
+                except Exception as e:
+                    logger.error(f"推播失敗 {user_id}: {e}")
+        
+        logger.info(f"週五提醒執行完成，共推播給 {len(schedules_by_user)} 位用戶")
+    except Exception as e:
+        logger.error(f"週五提醒執行失敗: {e}")
+
+def daily_cleanup():
+    """每日清理過期的已刪除行程"""
+    try:
+        logger.info("每日清理任務執行")
+    except Exception as e:
+        logger.error(f"每日清理任務執行失敗: {e}")
+
+# 設定排程器
+scheduler = BackgroundScheduler(timezone=TZ)
+
+# 週五早上10點推播兩週後行程
+scheduler.add_job(
+    friday_reminder,
+    'cron',
+    day_of_week='fri',
+    hour=10,
+    minute=0,
+    id='friday_reminder'
+)
+
+# 每日凌晨2點執行清理任務
+scheduler.add_job(
+    daily_cleanup,
+    'cron',
+    hour=2,
+    minute=0,
+    id='daily_cleanup'
+)
+
+# 錯誤處理
+@app.errorhandler(404)
+def not_found(error):
+    return "Not Found", 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"Internal server error: {error}")
+    return "Internal Server Error", 500
+
+# 確保程式結束時正確關閉排程器
+def shutdown_scheduler():
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("排程器已關閉")
+
+atexit.register(shutdown_scheduler)
+
+if __name__ == "__main__":
+    try:
+        # 啟動排程器
+        scheduler.start()
+        logger.info("排程器已啟動")
+        
+        # 測試連接
+        if USE_GOOGLE_SHEETS:
+            try:
+                test_records = schedule_manager.sheet.get_all_records()
+                logger.info(f"Google Sheets 連接測試成功，共 {len(test_records)} 筆記錄")
+            except Exception as e:
+                logger.error(f"Google Sheets 連接測試失敗: {e}")
+        else:
+            logger.info("使用記憶體模式運行")
+        
+        # 啟動 Flask 應用
+        port = int(os.environ.get("PORT", 3000))
+        logger.info(f"LINE Bot 行程管理系統啟動，監聽端口: {port}")
+        app.run(host="0.0.0.0", port=port, debug=False)
+        
+    except KeyboardInterrupt:
+        logger.info("接收到中斷信號，正在關閉系統...")
+        shutdown_scheduler()
+    except Exception as e:
+        logger.error(f"應用程式啟動失敗: {e}")
+        shutdown_scheduler()
+        raise
