@@ -83,27 +83,80 @@ class ScheduleManager:
     
     def setup_google_sheets(self):
         try:
+            logger.info("開始設定 Google Sheets 連接...")
+            
+            # 解析憑證
             credentials_dict = json.loads(GOOGLE_CREDENTIALS)
+            logger.info("成功解析 Google 憑證")
+            
+            # 建立憑證物件
             creds = Credentials.from_service_account_info(
                 credentials_dict,
                 scopes=['https://www.googleapis.com/auth/spreadsheets']
             )
-            self.gc = gspread.authorize(creds)
-            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+            logger.info("成功建立 Google 憑證物件")
             
+            # 授權並連接
+            self.gc = gspread.authorize(creds)
+            logger.info("成功授權 Google Sheets")
+            
+            # 開啟試算表
+            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+            logger.info(f"成功開啟試算表: {SPREADSHEET_ID}")
+            
+            # 測試讀取權限
+            try:
+                test_data = self.sheet.get_all_values()
+                logger.info(f"測試讀取成功，目前有 {len(test_data)} 行資料")
+            except Exception as e:
+                logger.error(f"測試讀取失敗: {e}")
+                raise
+            
+            # 確保表頭存在
             headers = ['ID', '日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID', '狀態']
             try:
                 existing_headers = self.sheet.row_values(1)
+                logger.info(f"現有表頭: {existing_headers}")
+                
                 if not existing_headers or len(existing_headers) < len(headers):
+                    logger.info("需要設定表頭")
                     if existing_headers:
                         self.sheet.update('A1:H1', [headers])
+                        logger.info("更新表頭完成")
                     else:
                         self.sheet.insert_row(headers, 1)
-                logger.info("Google Sheets 表頭設定完成")
+                        logger.info("插入表頭完成")
+                else:
+                    logger.info("表頭已存在且正確")
+                    
             except Exception as e:
-                logger.error(f"設定表頭錯誤: {e}")
+                logger.error(f"設定表頭時發生錯誤: {e}")
+                # 不要因為表頭問題而中斷連接
+                pass
                 
-            logger.info("Google Sheets 連接成功")
+            # 測試寫入權限
+            try:
+                test_id = f"TEST{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}"
+                test_row = [test_id, '2099-12-31', '23:59', '測試行程', '', datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S'), 'TEST_USER', '測試']
+                self.sheet.append_row(test_row)
+                logger.info("測試寫入成功")
+                
+                # 立即刪除測試資料
+                try:
+                    all_values = self.sheet.get_all_values()
+                    for i, row in enumerate(all_values):
+                        if len(row) > 0 and row[0] == test_id:
+                            self.sheet.delete_rows(i + 1)
+                            logger.info("測試資料已清除")
+                            break
+                except Exception as del_e:
+                    logger.warning(f"清除測試資料失敗: {del_e}")
+                    
+            except Exception as e:
+                logger.error(f"測試寫入失敗: {e}")
+                raise
+                
+            logger.info("Google Sheets 連接設定完成")
             
         except Exception as e:
             logger.error(f"Google Sheets 連接失敗: {e}")
@@ -111,11 +164,14 @@ class ScheduleManager:
     
     def add_schedule(self, date_str, time_str, content, user_id, reminder=None):
         try:
+            # 驗證日期格式
             schedule_date = datetime.strptime(date_str, '%Y-%m-%d')
             
+            # 驗證時間格式（如果有提供）
             if time_str:
                 datetime.strptime(time_str, '%H:%M')
                 
+            # 檢查是否為過去的日期
             today = datetime.now(TZ).date()
             if schedule_date.date() < today:
                 logger.warning(f"嘗試新增過去的日期: {date_str}")
@@ -123,32 +179,65 @@ class ScheduleManager:
             
             created_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')
             
+            # 優先嘗試寫入 Google Sheets
             if USE_GOOGLE_SHEETS and self.sheet:
                 try:
+                    # 產生唯一 ID
                     schedule_id = f"S{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                    
+                    # 準備寫入資料
                     row = [schedule_id, date_str, time_str or '', content, reminder or '', created_time, user_id, '有效']
+                    
+                    # 寫入 Google Sheets
+                    logger.info(f"正在寫入 Google Sheets: {schedule_id}")
                     self.sheet.append_row(row)
                     logger.info(f"成功寫入 Google Sheets: {schedule_id}")
                     
-                except Exception as e:
-                    logger.error(f"寫入 Google Sheets 失敗: {e}")
+                    # 立即驗證寫入是否成功
+                    import time
+                    time.sleep(1)  # 等待1秒讓 Google Sheets 同步
+                    
+                    try:
+                        # 檢查最後幾行是否包含我們剛寫入的資料
+                        all_values = self.sheet.get_all_values()
+                        if len(all_values) > 1:  # 確保有資料行
+                            last_row = all_values[-1]
+                            if len(last_row) > 0 and last_row[0] == schedule_id:
+                                logger.info(f"驗證寫入成功: {schedule_id}")
+                                return schedule_id
+                            else:
+                                logger.warning(f"寫入驗證失敗，最後一行: {last_row}")
+                                raise Exception("寫入驗證失敗")
+                        else:
+                            logger.warning("無法驗證寫入，表格可能為空")
+                            raise Exception("無法驗證寫入")
+                    except Exception as verify_e:
+                        logger.error(f"驗證寫入時發生錯誤: {verify_e}")
+                        raise Exception(f"寫入驗證失敗: {verify_e}")
+                        
+                except Exception as sheets_e:
+                    logger.error(f"寫入 Google Sheets 失敗: {sheets_e}")
+                    logger.info("回退到記憶體模式儲存")
+                    
+                    # 回退到記憶體模式
                     schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
                     schedule = {
                         'ID': schedule_id, '日期': date_str, '時間': time_str or '', '行程內容': content,
                         '提醒設定': reminder or '', '建立時間': created_time, 'LINE用戶ID': user_id, '狀態': '有效'
                     }
                     memory_storage.append(schedule)
-                    logger.info(f"回退到記憶體模式: {schedule_id}")
+                    logger.info(f"成功儲存到記憶體: {schedule_id}")
+                    return schedule_id
             else:
+                # 直接使用記憶體模式
                 schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
                 schedule = {
                     'ID': schedule_id, '日期': date_str, '時間': time_str or '', '行程內容': content,
                     '提醒設定': reminder or '', '建立時間': created_time, 'LINE用戶ID': user_id, '狀態': '有效'
                 }
                 memory_storage.append(schedule)
-            
-            logger.info(f"成功新增行程: {user_id} - {date_str} {time_str} {content} (ID: {schedule_id})")
-            return schedule_id
+                logger.info(f"記憶體模式儲存: {schedule_id}")
+                return schedule_id
             
         except ValueError as e:
             logger.error(f"日期時間格式錯誤: {e}")
@@ -712,26 +801,61 @@ def handle_message(event):
         
         elif text in ["狀態", "系統狀態", "status"]:
             try:
+                # 檢測 Google Sheets 連接狀態
                 if USE_GOOGLE_SHEETS and schedule_manager.sheet:
-                    test_records = schedule_manager.sheet.get_all_records()
-                    sheets_status = "✅ Google Sheets 正常"
-                    total_records = len([r for r in test_records if r.get('行程內容')])
-                    user_records = len([r for r in test_records if r.get('LINE用戶ID') == user_id and r.get('狀態') != '已刪除'])
+                    try:
+                        # 測試讀取
+                        test_records = schedule_manager.sheet.get_all_records()
+                        sheets_status = "✅ Google Sheets 連接正常"
+                        total_records = len([r for r in test_records if r.get('行程內容')])
+                        user_records = len([r for r in test_records if r.get('LINE用戶ID') == user_id and r.get('狀態') != '已刪除'])
+                        
+                        # 測試寫入權限
+                        try:
+                            test_id = f"TEST{datetime.now(TZ).strftime('%H%M%S')}"
+                            test_row = [test_id, '2099-12-31', '23:59', '連接測試', '', datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S'), 'TEST_USER', '測試']
+                            schedule_manager.sheet.append_row(test_row)
+                            
+                            # 立即刪除測試資料
+                            import time
+                            time.sleep(1)
+                            all_values = schedule_manager.sheet.get_all_values()
+                            for i, row in enumerate(all_values):
+                                if len(row) > 0 and row[0] == test_id:
+                                    schedule_manager.sheet.delete_rows(i + 1)
+                                    break
+                            
+                            sheets_status += " (讀寫正常)"
+                            
+                        except Exception as write_e:
+                            sheets_status = f"⚠️ Google Sheets 只讀模式 (寫入失敗: {str(write_e)[:50]}...)"
+                            
+                    except Exception as read_e:
+                        sheets_status = f"❌ Google Sheets 連接異常 (讀取失敗: {str(read_e)[:50]}...)"
+                        total_records = 0
+                        user_records = 0
                 else:
-                    sheets_status = "📱 記憶體模式"
+                    sheets_status = "📱 記憶體模式運行"
                     total_records = len([r for r in memory_storage if r.get('行程內容')])
                     user_records = len([r for r in memory_storage if r.get('LINE用戶ID') == user_id and r.get('狀態') != '已刪除'])
-            except:
-                sheets_status = "❌ 連接異常"
+                    
+            except Exception as e:
+                logger.error(f"狀態檢查失敗: {e}")
+                sheets_status = f"❌ 狀態檢查失敗: {str(e)[:50]}..."
                 total_records = 0
                 user_records = 0
             
+            # 環境變數檢查
+            env_status = "✅ 完整" if USE_GOOGLE_SHEETS else "⚠️ 缺少 Google Sheets 設定"
+            
             reply_text = (f"🔧 系統狀態報告\n\n"
                          f"📊 資料儲存: {sheets_status}\n"
+                         f"🔑 環境變數: {env_status}\n"
                          f"📈 總行程數: {total_records}\n"
                          f"👤 您的行程數: {user_records}\n"
                          f"🕐 系統時間: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}\n"
-                         f"🌏 時區: Asia/Taipei")
+                         f"🌏 時區: Asia/Taipei\n"
+                         f"🤖 LINE SDK: v{LINEBOT_SDK_VERSION}")
         
         elif text.startswith("倒數"):
             reply_text = "❌ 請輸入正確格式：倒數 X 分鐘，例如：倒數 5 分鐘（1-60分鐘）"
