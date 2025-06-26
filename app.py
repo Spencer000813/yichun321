@@ -101,7 +101,7 @@ class ScheduleManager:
             logger.info("成功授權 Google Sheets")
             
             # 開啟試算表
-            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).提醒
             logger.info(f"成功開啟試算表: {SPREADSHEET_ID}")
             
             # 測試讀取權限
