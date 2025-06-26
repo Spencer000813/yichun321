@@ -3,13 +3,27 @@ import json
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    ApiClient, MessagingApi, MessagingApiConfiguration,
-    ReplyMessageRequest, TextMessage, PushMessageRequest
-)
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
+
+# 嘗試使用 LINE Bot SDK v3，如果失敗則回退到 v2
+try:
+    from linebot.v3.webhook import WebhookHandler
+    from linebot.v3.exceptions import InvalidSignatureError
+    from linebot.v3.messaging import (
+        Configuration, ApiClient, MessagingApi,
+        ReplyMessageRequest, TextMessage, PushMessageRequest
+    )
+    from linebot.v3.webhooks import MessageEvent, TextMessageContent
+    LINEBOT_SDK_VERSION = 3
+    logger = logging.getLogger(__name__)
+    logger.info("使用 LINE Bot SDK v3")
+except ImportError:
+    # 回退到 v2
+    from linebot import LineBotApi, WebhookHandler
+    from linebot.exceptions import InvalidSignatureError
+    from linebot.models import MessageEvent, TextMessage, TextSendMessage
+    LINEBOT_SDK_VERSION = 2
+    logger = logging.getLogger(__name__)
+    logger.info("回退到 LINE Bot SDK v2")
 import gspread
 from google.oauth2.service_account import Credentials
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -37,11 +51,21 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     logger.error("缺少 LINE Bot 環境變數")
     raise ValueError("請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET 環境變數")
 
-# 初始化 LINE Bot API v3
-configuration = MessagingApiConfiguration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-api_client = ApiClient(configuration)
-line_bot_api = MessagingApi(api_client)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
+# 初始化 LINE Bot API（根據版本）
+if LINEBOT_SDK_VERSION == 3:
+    try:
+        configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+        api_client = ApiClient(configuration)
+        line_bot_api = MessagingApi(api_client)
+        handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    except Exception as e:
+        logger.error(f"LINE Bot SDK v3 初始化失敗: {e}")
+        # 如果 v3 初始化失敗，嘗試 v2
+        LINEBOT_SDK_VERSION = 2
+        
+if LINEBOT_SDK_VERSION == 2:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Google Sheets 設定
 GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
@@ -496,7 +520,7 @@ def webhook():
         abort(400)
     return "OK", 200
 
-@handler.add(MessageEvent, message=TextMessageContent)
+@handler.add(MessageEvent, message=(TextMessageContent if LINEBOT_SDK_VERSION == 3 else TextMessage))
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
@@ -507,13 +531,7 @@ def handle_message(event):
             try:
                 minute = int(re.search(r'\d+', text).group())
                 if 0 < minute <= 60:
-                    reply_message = TextMessage(text=f"⏰ 倒數 {minute} 分鐘開始！我會在時間到時提醒你。")
-                    line_bot_api.reply_message(
-                        ReplyMessageRequest(
-                            reply_token=event.reply_token,
-                            messages=[reply_message]
-                        )
-                    )
+                    reply_text = f"⏰ 倒數 {minute} 分鐘開始！我會在時間到時提醒你。"
                     
                     # 決定推送目標
                     if hasattr(event.source, 'group_id') and event.source.group_id:
@@ -525,18 +543,37 @@ def handle_message(event):
                     
                     def send_reminder():
                         try:
-                            push_message = TextMessage(text=f"⏰ {minute} 分鐘倒數結束，時間到囉！")
-                            line_bot_api.push_message(
-                                PushMessageRequest(
-                                    to=target_id,
-                                    messages=[push_message]
+                            reminder_text = f"⏰ {minute} 分鐘倒數結束，時間到囉！"
+                            if LINEBOT_SDK_VERSION == 3:
+                                push_message = TextMessage(text=reminder_text)
+                                line_bot_api.push_message(
+                                    PushMessageRequest(
+                                        to=target_id,
+                                        messages=[push_message]
+                                    )
                                 )
-                            )
+                            else:
+                                line_bot_api.push_message(target_id, TextSendMessage(text=reminder_text))
                             logger.info(f"成功發送倒數提醒: {minute} 分鐘")
                         except Exception as e:
                             logger.error(f"推送提醒失敗: {e}")
                     
                     Timer(minute * 60, send_reminder).start()
+                    
+                    # 立即回覆確認訊息
+                    if LINEBOT_SDK_VERSION == 3:
+                        reply_message = TextMessage(text=reply_text)
+                        line_bot_api.reply_message(
+                            ReplyMessageRequest(
+                                reply_token=event.reply_token,
+                                messages=[reply_message]
+                            )
+                        )
+                    else:
+                        line_bot_api.reply_message(
+                            event.reply_token,
+                            TextSendMessage(text=reply_text)
+                        )
                     return
                 else:
                     reply_text = "⚠️ 倒數時間請設定在 1-60 分鐘之間"
@@ -853,26 +890,39 @@ def handle_message(event):
                          "請輸入「幫助」查看使用說明，或直接輸入行程資訊\n"
                          "例如：今天10點開會、7/14 聚餐")
         
-        # 發送回覆
-        reply_message = TextMessage(text=reply_text)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[reply_message]
+        # 發送回覆（兼容兩個版本）
+        if LINEBOT_SDK_VERSION == 3:
+            reply_message = TextMessage(text=reply_text)
+            line_bot_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[reply_message]
+                )
             )
-        )
+        else:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=reply_text)
+            )
     
     except Exception as e:
         error_msg = f"處理訊息時發生錯誤: {str(e)}"
         logger.error(error_msg)
         try:
-            error_reply = TextMessage(text="系統發生異常，請稍後再試或聯繫管理員")
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[error_reply]
+            error_text = "系統發生異常，請稍後再試或聯繫管理員"
+            if LINEBOT_SDK_VERSION == 3:
+                error_reply = TextMessage(text=error_text)
+                line_bot_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[error_reply]
+                    )
                 )
-            )
+            else:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text=error_text)
+                )
         except:
             pass
 
@@ -914,13 +964,17 @@ def friday_reminder():
                         message += f"   📝 {content} (全天)\n"
                 
                 try:
-                    push_message = TextMessage(text=message.strip())
-                    line_bot_api.push_message(
-                        PushMessageRequest(
-                            to=user_id,
-                            messages=[push_message]
+                    message_text = message.strip()
+                    if LINEBOT_SDK_VERSION == 3:
+                        push_message = TextMessage(text=message_text)
+                        line_bot_api.push_message(
+                            PushMessageRequest(
+                                to=user_id,
+                                messages=[push_message]
+                            )
                         )
-                    )
+                    else:
+                        line_bot_api.push_message(user_id, TextSendMessage(text=message_text))
                     logger.info(f"成功推播週五提醒給用戶: {user_id}")
                 except Exception as e:
                     logger.error(f"推播失敗 {user_id}: {e}")
