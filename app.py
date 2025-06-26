@@ -69,9 +69,9 @@ def send_countdown_reminder(user_id, minutes):
     except Exception as e:
         print(f"推播{minutes}分鐘倒數提醒失敗：{e}")
 
-# 修正後的每週日晚間推播下週行程（只發送到指定群組）
+# 修改為每週五早上推播2週後行程
 def weekly_summary():
-    print("開始執行每週行程摘要...")
+    print("開始執行2週後行程摘要...")
     try:
         # 檢查是否已設定群組 ID
         if TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
@@ -81,19 +81,27 @@ def weekly_summary():
         all_rows = sheet.get_all_values()[1:]
         now = datetime.now()
         
-        # 修正：計算下週一到下週日的範圍
-        # 如果今天是週日(6)，下週一就是明天(+1天)
-        # 如果今天是週一(0)，下週一就是7天後
-        days_until_next_monday = (7 - now.weekday()) % 7
-        if days_until_next_monday == 0:  # 如果今天是週一
-            days_until_next_monday = 7   # 取下週一
+        # 計算2週後的時間範圍
+        # 從今天起算2週後的週一到週日
+        start = now + timedelta(weeks=2)
+        
+        # 找到那一週的週一
+        days_until_monday = (7 - start.weekday()) % 7
+        if days_until_monday == 0 and start.weekday() != 0:  # 如果不是週一
+            days_until_monday = 7
+        elif start.weekday() == 0:  # 如果已經是週一
+            days_until_monday = 0
+        else:
+            days_until_monday = 7 - start.weekday()
             
-        start = now + timedelta(days=days_until_next_monday)
-        end = start + timedelta(days=6)
+        start = start + timedelta(days=days_until_monday)
         start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # 該週的週日
+        end = start + timedelta(days=6)
         end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        print(f"查詢時間範圍：{start.strftime('%Y/%m/%d %H:%M')} 到 {end.strftime('%Y/%m/%d %H:%M')}")
+        print(f"查詢2週後行程時間範圍：{start.strftime('%Y/%m/%d %H:%M')} 到 {end.strftime('%Y/%m/%d %H:%M')}")
         
         user_schedules = {}
 
@@ -109,14 +117,14 @@ def weekly_summary():
                 print(f"處理行程資料失敗：{e}")
                 continue
 
-        print(f"找到 {len(user_schedules)} 位使用者有下週行程")
+        print(f"找到 {len(user_schedules)} 位使用者有2週後行程")
         
         if not user_schedules:
             # 如果沒有行程，也發送提醒
-            message = f"📅 下週行程摘要 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n🎉 下週沒有安排任何行程，好好放鬆吧！"
+            message = f"📅 2週後行程預覽 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n🎉 2週後沒有安排任何行程，目前行程安排很輕鬆！"
         else:
             # 整理所有使用者的行程到一個訊息中
-            message = f"📅 下週行程摘要 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n"
+            message = f"📅 2週後行程預覽 ({start.strftime('%m/%d')} - {end.strftime('%m/%d')})：\n\n"
             
             # 按日期排序所有行程
             all_schedules = []
@@ -133,29 +141,29 @@ def weekly_summary():
                     current_date = dt.date()
                     message += f"\n📆 *{dt.strftime('%m/%d (%a)')}*\n"
                 
-                # 顯示時間和內容（可選擇是否顯示使用者 ID）
+                # 顯示時間和內容
                 message += f"• {dt.strftime('%H:%M')} {content}\n"
         
         try:
             line_bot_api.push_message(TARGET_GROUP_ID, TextSendMessage(text=message))
-            print(f"已發送週報摘要到群組：{TARGET_GROUP_ID}")
+            print(f"已發送2週後行程預覽到群組：{TARGET_GROUP_ID}")
         except Exception as e:
-            print(f"推播週報到群組失敗：{e}")
+            print(f"推播2週後行程到群組失敗：{e}")
                 
-        print("每週行程摘要執行完成")
+        print("2週後行程預覽執行完成")
                 
     except Exception as e:
-        print(f"每週行程摘要執行失敗：{e}")
+        print(f"2週後行程預覽執行失敗：{e}")
 
 # 手動觸發週報（用於測試）
 def manual_weekly_summary():
-    print("手動執行每週行程摘要...")
+    print("手動執行2週後行程預覽...")
     weekly_summary()
 
-# 排程任務
+# 修改排程任務
 scheduler.add_job(
     weekly_summary, 
-    CronTrigger(day_of_week="sun", hour=22, minute=0),   # 週日晚上 22:00 (可自行調整)
+    CronTrigger(day_of_week="fri", hour=10, minute=0),   # 週五早上 10:00
     id="weekly_summary"
 )
 scheduler.add_job(
@@ -229,11 +237,11 @@ def handle_message(event):
         if group_id:
             global TARGET_GROUP_ID
             TARGET_GROUP_ID = group_id
-            reply = f"✅ 已設定此群組為早安訊息群組\n群組 ID: {group_id}\n每天早上7點會自動發送早安訊息"
+            reply = f"✅ 已設定此群組為早安訊息群組\n群組 ID: {group_id}\n每天早上8:30會自動發送早安訊息"
         else:
             reply = "❌ 此指令只能在群組中使用"
     elif lower_text == "查看群組設定":
-        reply = f"目前群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'C4e138aa0eb252daa89846daab0102e41' else '❌ 尚未設定'}\n\n功能說明：\n• 早安訊息：每天7點推播\n• 週報摘要：每週日晚上推播下週行程"
+        reply = f"目前群組 ID: {TARGET_GROUP_ID}\n{'✅ 已設定' if TARGET_GROUP_ID != 'C4e138aa0eb252daa89846daab0102e41' else '❌ 尚未設定'}\n\n功能說明：\n• 早安訊息：每天早上8:30推播\n• 行程預覽：每週五早上10:00推播2週後行程"
     elif lower_text == "測試早安":
         group_id = getattr(event.source, "group_id", None)
         if group_id == TARGET_GROUP_ID or TARGET_GROUP_ID == "C4e138aa0eb252daa89846daab0102e41":
@@ -243,9 +251,9 @@ def handle_message(event):
     elif lower_text == "測試週報":
         try:
             manual_weekly_summary()
-            reply = "✅ 週報已手動執行，請檢查 log 確認執行狀況"
+            reply = "✅ 2週後行程預覽已手動執行，請檢查 log 確認執行狀況"
         except Exception as e:
-            reply = f"❌ 週報執行失敗：{str(e)}"
+            reply = f"❌ 2週後行程預覽執行失敗：{str(e)}"
     elif lower_text == "查看id":
         group_id = getattr(event.source, "group_id", None)
         user_id = event.source.user_id
@@ -281,7 +289,7 @@ def handle_message(event):
             "• 查看群組設定 - 查看目前設定\n"
             "• 測試早安 - 測試早安訊息\n\n"
             "🔧 測試指令：\n"
-            "• 測試週報 - 手動執行週報推播\n"
+            "• 測試週報 - 手動執行2週後行程預覽\n"
             "• 查看排程 - 查看目前排程狀態\n"
             "• 查看id - 查看目前群組/使用者 ID"
         )
@@ -439,7 +447,7 @@ if __name__ == "__main__":
     print("LINE Bot 啟動中...")
     print("排程任務:")
     print("- 每天早上 8:30 發送早安訊息")
-    print("- 每週日晚上 22:00 發送下週行程摘要")
+    print("- 每週五早上 10:00 發送2週後行程預覽")
     print("倒數計時功能:")
     print("- 倒數3分鐘：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
     print("- 倒數5分鐘：輸入 '倒數5分鐘'")
