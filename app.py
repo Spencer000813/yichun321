@@ -1,444 +1,4 @@
-import os
-import json
-import logging
-from datetime import datetime, timedelta
-from flask import Flask, request, abort
-
-# 嘗試使用 LINE Bot SDK v3，如果失敗則回退到 v2
 try:
-    from linebot.v3.webhook import WebhookHandler
-    from linebot.v3.exceptions import InvalidSignatureError
-    from linebot.v3.messaging import (
-        Configuration, ApiClient, MessagingApi,
-        ReplyMessageRequest, TextMessage, PushMessageRequest
-    )
-    from linebot.v3.webhooks import MessageEvent, TextMessageContent
-    LINEBOT_SDK_VERSION = 3
-    logger = logging.getLogger(__name__)
-    logger.info("使用 LINE Bot SDK v3")
-except ImportError:
-    # 回退到 v2
-    from linebot import LineBotApi, WebhookHandler
-    from linebot.exceptions import InvalidSignatureError
-    from linebot.models import MessageEvent, TextMessage, TextSendMessage
-    LINEBOT_SDK_VERSION = 2
-    logger = logging.getLogger(__name__)
-    logger.info("回退到 LINE Bot SDK v2")
-import gspread
-from google.oauth2.service_account import Credentials
-from apscheduler.schedulers.background import BackgroundScheduler
-import pytz
-import re
-from threading import Timer
-import atexit
-from calendar import monthrange
-
-# 設定日誌
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-
-# LINE Bot 驗證資料
-LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
-# 檢查必要的環境變數
-if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    logger.error("缺少 LINE Bot 環境變數")
-    raise ValueError("請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET 環境變數")
-
-# 初始化 LINE Bot API（根據版本）
-if LINEBOT_SDK_VERSION == 3:
-    try:
-        configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-        api_client = ApiClient(configuration)
-        line_bot_api = MessagingApi(api_client)
-        handler = WebhookHandler(LINE_CHANNEL_SECRET)
-    except Exception as e:
-        logger.error(f"LINE Bot SDK v3 初始化失敗: {e}")
-        # 如果 v3 初始化失敗，嘗試 v2
-        LINEBOT_SDK_VERSION = 2
-        
-if LINEBOT_SDK_VERSION == 2:
-    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-    handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# Google Sheets 設定
-GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-
-# 如果沒有設定 Google Sheets 相關環境變數，使用模擬模式
-if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
-    logger.warning("未設定 GOOGLE_CREDENTIALS 或 SPREADSHEET_ID，將使用記憶體模式運行")
-    USE_GOOGLE_SHEETS = False
-else:
-    USE_GOOGLE_SHEETS = True
-
-# 時區設定
-TZ = pytz.timezone('Asia/Taipei')
-
-# 記憶體儲存（當無法使用 Google Sheets 時）
-memory_storage = []
-
-class ScheduleManager:
-    def __init__(self):
-        self.gc = None
-        self.sheet = None
-        if USE_GOOGLE_SHEETS:
-            self.setup_google_sheets()
-    
-    def setup_google_sheets(self):
-        """設定 Google Sheets 連接"""
-        try:
-            credentials_dict = json.loads(GOOGLE_CREDENTIALS)
-            creds = Credentials.from_service_account_info(
-                credentials_dict,
-                scopes=['https://www.googleapis.com/auth/spreadsheets']
-            )
-            self.gc = gspread.authorize(creds)
-            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
-            
-            # 確保表頭存在
-            headers = ['ID', '日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID', '狀態']
-            try:
-                existing_headers = self.sheet.row_values(1)
-                if not existing_headers or len(existing_headers) < len(headers):
-                    if existing_headers:
-                        self.sheet.update('A1:H1', [headers])
-                    else:
-                        self.sheet.insert_row(headers, 1)
-                logger.info("Google Sheets 表頭設定完成")
-            except Exception as e:
-                logger.error(f"設定表頭時發生錯誤: {e}")
-                
-            logger.info("Google Sheets 連接成功")
-            
-            # 測試寫入權限
-            try:
-                test_row = len(self.sheet.get_all_values()) + 1
-                logger.info(f"Sheet 目前有 {test_row - 1} 行資料")
-            except Exception as e:
-                logger.error(f"讀取 Sheet 資料時發生錯誤: {e}")
-                
-        except Exception as e:
-            logger.error(f"Google Sheets 連接失敗: {e}")
-            raise
-    
-    def add_schedule(self, date_str, time_str, content, user_id, reminder=None):
-        """新增行程"""
-        try:
-            # 驗證日期格式
-            schedule_date = datetime.strptime(date_str, '%Y-%m-%d')
-            
-            # 驗證時間格式（如果有提供）
-            if time_str:
-                datetime.strptime(time_str, '%H:%M')
-                
-            # 檢查是否為過去的日期
-            today = datetime.now(TZ).date()
-            if schedule_date.date() < today:
-                logger.warning(f"嘗試新增過去的日期: {date_str}")
-                return "過去日期"
-            
-            created_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')
-            
-            if USE_GOOGLE_SHEETS and self.sheet:
-                try:
-                    # 產生唯一 ID
-                    schedule_id = f"S{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
-                    
-                    row = [schedule_id, date_str, time_str or '', content, reminder or '', created_time, user_id, '有效']
-                    
-                    # 使用 append_row 方法
-                    self.sheet.append_row(row)
-                    logger.info(f"成功寫入 Google Sheets: {schedule_id}")
-                    
-                    # 驗證寫入
-                    try:
-                        all_records = self.sheet.get_all_records()
-                        latest_record = all_records[-1] if all_records else None
-                        if latest_record and latest_record.get('ID') == schedule_id:
-                            logger.info(f"驗證寫入成功: {schedule_id}")
-                        else:
-                            logger.warning(f"寫入驗證失敗: {schedule_id}")
-                    except Exception as e:
-                        logger.error(f"驗證寫入時發生錯誤: {e}")
-                        
-                except Exception as e:
-                    logger.error(f"寫入 Google Sheets 失敗: {e}")
-                    # 如果寫入失敗，回退到記憶體模式
-                    schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
-                    schedule = {
-                        'ID': schedule_id,
-                        '日期': date_str,
-                        '時間': time_str or '',
-                        '行程內容': content,
-                        '提醒設定': reminder or '',
-                        '建立時間': created_time,
-                        'LINE用戶ID': user_id,
-                        '狀態': '有效'
-                    }
-                    memory_storage.append(schedule)
-                    logger.info(f"回退到記憶體模式儲存: {schedule_id}")
-            else:
-                # 記憶體模式
-                schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
-                schedule = {
-                    'ID': schedule_id,
-                    '日期': date_str,
-                    '時間': time_str or '',
-                    '行程內容': content,
-                    '提醒設定': reminder or '',
-                    '建立時間': created_time,
-                    'LINE用戶ID': user_id,
-                    '狀態': '有效'
-                }
-                memory_storage.append(schedule)
-            
-            logger.info(f"成功新增行程: {user_id} - {date_str} {time_str} {content} (ID: {schedule_id})")
-            return schedule_id  # 返回行程 ID
-        except ValueError as e:
-            logger.error(f"日期時間格式錯誤: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"新增行程失敗: {e}")
-            return False
-    
-    def get_schedules_by_date_range(self, start_date, end_date, user_id=None):
-        """取得指定日期範圍的行程"""
-        try:
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-            else:
-                all_records = memory_storage
-            
-            schedules = []
-            
-            for record in all_records:
-                if not record.get('日期') or not record.get('行程內容'):
-                    continue
-                    
-                if record.get('狀態') == '已刪除':
-                    continue
-                    
-                if user_id and record.get('LINE用戶ID') != user_id:
-                    continue
-                
-                try:
-                    schedule_date = datetime.strptime(record['日期'], '%Y-%m-%d').date()
-                    if start_date <= schedule_date <= end_date:
-                        schedules.append(record)
-                except ValueError:
-                    logger.warning(f"日期格式錯誤: {record.get('日期')}")
-                    continue
-            
-            return sorted(schedules, key=lambda x: (x['日期'], x.get('時間', '')))
-        except Exception as e:
-            logger.error(f"取得行程失敗: {e}")
-            return []
-    
-    def get_today_schedules(self, user_id):
-        """取得今日行程"""
-        today = datetime.now(TZ).date()
-        return self.get_schedules_by_date_range(today, today, user_id)
-    
-    def get_tomorrow_schedules(self, user_id):
-        """取得明日行程"""
-        tomorrow = datetime.now(TZ).date() + timedelta(days=1)
-        return self.get_schedules_by_date_range(tomorrow, tomorrow, user_id)
-    
-    def get_this_week_schedules(self, user_id):
-        """取得本週行程"""
-        today = datetime.now(TZ).date()
-        days_since_monday = today.weekday()
-        this_monday = today - timedelta(days=days_since_monday)
-        this_sunday = this_monday + timedelta(days=6)
-        return self.get_schedules_by_date_range(this_monday, this_sunday, user_id)
-    
-    def get_next_week_schedules(self, user_id):
-        """取得下週行程"""
-        today = datetime.now(TZ).date()
-        days_until_next_monday = 7 - today.weekday()
-        next_monday = today + timedelta(days=days_until_next_monday)
-        next_sunday = next_monday + timedelta(days=6)
-        return self.get_schedules_by_date_range(next_monday, next_sunday, user_id)
-    
-    def get_this_month_schedules(self, user_id):
-        """取得本月行程"""
-        today = datetime.now(TZ).date()
-        this_month_start = today.replace(day=1)
-        _, last_day = monthrange(today.year, today.month)
-        this_month_end = today.replace(day=last_day)
-        return self.get_schedules_by_date_range(this_month_start, this_month_end, user_id)
-    
-    def get_next_month_schedules(self, user_id):
-        """取得下個月行程"""
-        today = datetime.now(TZ).date()
-        
-        if today.month == 12:
-            next_month_start = today.replace(year=today.year + 1, month=1, day=1)
-        else:
-            next_month_start = today.replace(month=today.month + 1, day=1)
-        
-        year = next_month_start.year
-        month = next_month_start.month
-        _, last_day = monthrange(year, month)
-        next_month_end = next_month_start.replace(day=last_day)
-        
-        return self.get_schedules_by_date_range(next_month_start, next_month_end, user_id)
-    
-    def get_next_year_schedules(self, user_id):
-        """取得明年行程"""
-        today = datetime.now(TZ).date()
-        next_year_start = today.replace(year=today.year + 1, month=1, day=1)
-        next_year_end = today.replace(year=today.year + 1, month=12, day=31)
-        return self.get_schedules_by_date_range(next_year_start, next_year_end, user_id)
-    
-    def get_schedule_by_id(self, schedule_id, user_id=None):
-        """根據 ID 查詢特定行程"""
-        try:
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-            else:
-                all_records = memory_storage
-            
-            for record in all_records:
-                if (record.get('ID') == schedule_id and 
-                    record.get('狀態') != '已刪除'):
-                    
-                    # 如果指定了 user_id，則檢查是否為該用戶的行程
-                    if user_id and record.get('LINE用戶ID') != user_id:
-                        return None
-                    
-                    return record
-            
-            return None
-        except Exception as e:
-            logger.error(f"查詢行程 ID 失敗: {e}")
-            return None
-    
-    def get_user_schedules_with_id(self, user_id, limit=10):
-        """取得用戶最近的行程（包含 ID）"""
-        try:
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-            else:
-                all_records = memory_storage
-            
-            user_schedules = []
-            
-            for record in all_records:
-                if (record.get('LINE用戶ID') == user_id and 
-                    record.get('狀態') != '已刪除'):
-                    user_schedules.append(record)
-            
-            # 按建立時間排序，最新的在前
-            user_schedules.sort(key=lambda x: x.get('建立時間', ''), reverse=True)
-            
-            return user_schedules[:limit]
-        except Exception as e:
-            logger.error(f"查詢用戶行程失敗: {e}")
-            return []
-    
-    def get_recent_schedules(self, user_id, days=7):
-        """取得最近N天的行程"""
-        today = datetime.now(TZ).date()
-        end_date = today + timedelta(days=days-1)
-        return self.get_schedules_by_date_range(today, end_date, user_id)
-    
-    def delete_schedule_by_id(self, schedule_id, user_id):
-        """根據 ID 刪除行程"""
-        try:
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-                row_num = 2  # 從第二行開始（第一行是表頭）
-                
-                for record in all_records:
-                    if (record.get('ID') == schedule_id and
-                        record.get('LINE用戶ID') == user_id and
-                        record.get('狀態') != '已刪除'):
-                        
-                        # 標記為已刪除
-                        self.sheet.update(f'H{row_num}', '已刪除')
-                        logger.info(f"成功刪除行程 ID: {schedule_id}")
-                        return record
-                    row_num += 1
-            else:
-                # 記憶體模式刪除
-                for record in memory_storage:
-                    if (record.get('ID') == schedule_id and
-                        record.get('LINE用戶ID') == user_id and
-                        record.get('狀態') != '已刪除'):
-                        
-                        record['狀態'] = '已刪除'
-                        logger.info(f"成功刪除行程 ID: {schedule_id}")
-                        return record
-            
-            return None
-        except Exception as e:
-            logger.error(f"刪除行程 ID 失敗: {e}")
-            return None
-    def delete_schedule(self, user_id, date_str, content_keyword):
-        """刪除指定行程（原有方法保留）"""
-        try:
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-                row_num = 2
-                
-                for record in all_records:
-                    if (record.get('LINE用戶ID') == user_id and
-                        record.get('日期') == date_str and
-                        content_keyword in record.get('行程內容', '') and
-                        record.get('狀態') != '已刪除'):
-                        
-                        self.sheet.update(f'H{row_num}', '已刪除')
-                        logger.info(f"成功刪除行程: {user_id} - {date_str} {content_keyword}")
-                        return True
-                    row_num += 1
-            else:
-                # 記憶體模式刪除
-                for record in memory_storage:
-                    if (record.get('LINE用戶ID') == user_id and
-                        record.get('日期') == date_str and
-                        content_keyword in record.get('行程內容', '') and
-                        record.get('狀態') != '已刪除'):
-                        
-                        record['狀態'] = '已刪除'
-                        logger.info(f"成功刪除行程: {user_id} - {date_str} {content_keyword}")
-                        return True
-            
-            return False
-        except Exception as e:
-            logger.error(f"刪除行程失敗: {e}")
-            return False
-    
-    def get_two_weeks_later_schedules(self):
-        """取得兩週後的行程（用於週五推播）"""
-        try:
-            today = datetime.now(TZ).date()
-            two_weeks_later = today + timedelta(weeks=2)
-            start_of_week = two_weeks_later - timedelta(days=two_weeks_later.weekday())
-            end_of_week = start_of_week + timedelta(days=6)
-            
-            if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
-            else:
-                all_records = memory_storage
-            
-            schedules_by_user = {}
-            
-            for record in all_records:
-                if (not record.get('日期') or 
-                    not record.get('行程內容') or 
-                    not record.get('LINE用戶ID') or
-                    record.get('狀態') == '已刪除'):
-                    continue
-                    
-                try:
                     schedule_date = datetime.strptime(record['日期'], '%Y-%m-%d').date()
                     if start_of_week <= schedule_date <= end_of_week:
                         user_id = record['LINE用戶ID']
@@ -603,7 +163,7 @@ def parse_natural_input(text):
                         content = match.groups()[0]
                         return date_str, '', content.strip()
                 
-                # 處理原有格式...（其餘邏輯相同，省略以節省空間）
+                # 處理原有格式
                 elif pattern_type == 'date_time':
                     month, day, hour, minute, content = match.groups()
                     date_obj = datetime(current_year, int(month), int(day))
@@ -615,6 +175,55 @@ def parse_natural_input(text):
                     month, day, content = match.groups()
                     date_obj = datetime(current_year, int(month), int(day))
                     date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                    return date_str, '', content.strip()
+                
+                elif pattern_type == 'chinese_pm':
+                    month, day, hour, content = match.groups()
+                    date_obj = datetime(current_year, int(month), int(day))
+                    hour = int(hour)
+                    if hour < 12:
+                        hour += 12
+                    date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                    time_str = f"{hour:02d}:00"
+                    return date_str, time_str, content.strip()
+                
+                elif pattern_type == 'chinese_am':
+                    month, day, hour, content = match.groups()
+                    date_obj = datetime(current_year, int(month), int(day))
+                    hour = int(hour)
+                    if hour == 12:
+                        hour = 0
+                    date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                    time_str = f"{hour:02d}:00"
+                    return date_str, time_str, content.strip()
+                
+                elif pattern_type == 'chinese_default':
+                    month, day, hour, content = match.groups()
+                    date_obj = datetime(current_year, int(month), int(day))
+                    hour = int(hour)
+                    if hour > 24:
+                        continue
+                    date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                    time_str = f"{hour:02d}:00"
+                    return date_str, time_str, content.strip()
+                
+                elif pattern_type == 'chinese_date_only':
+                    month, day, content = match.groups()
+                    date_obj = datetime(current_year, int(month), int(day))
+                    date_str = f"{current_year}-{int(month):02d}-{int(day):02d}"
+                    return date_str, '', content.strip()
+                
+                elif pattern_type == 'full_date_time':
+                    year, month, day, hour, minute, content = match.groups()
+                    date_obj = datetime(int(year), int(month), int(day))
+                    date_str = f"{year}-{int(month):02d}-{int(day):02d}"
+                    time_str = f"{int(hour):02d}:{minute}"
+                    return date_str, time_str, content.strip()
+                
+                elif pattern_type == 'full_date_only':
+                    year, month, day, content = match.groups()
+                    date_obj = datetime(int(year), int(month), int(day))
+                    date_str = f"{year}-{int(month):02d}-{int(day):02d}"
                     return date_str, '', content.strip()
                 
             except (ValueError, IndexError):
@@ -896,7 +505,7 @@ def handle_message(event):
                          "🔧 系統功能 → 輸入「系統說明」\n"
                          "📖 完整說明 → 輸入「完整說明」\n\n"
                          "💡 提示：您也可以直接輸入行程資訊，例如：\n"
-                         "「今天10點開會」、「7/14 聚餐」")「今天10點開會」、「7/14 聚餐」")
+                         "「今天10點開會」、「7/14 聚餐」")
         
         # 新增行程說明
         elif text in ["新增說明", "新增幫助", "新增功能"]:
@@ -965,6 +574,7 @@ def handle_message(event):
                          "• 精確管理，不會誤刪\n"
                          "• 可查看詳細建立時間\n"
                          "• 支援批量管理")
+        
         # 刪除行程說明
         elif text in ["刪除說明", "刪除幫助", "刪除功能"]:
             reply_text = ("🗑️ 刪除行程功能說明\n\n"
@@ -1290,4 +900,447 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"應用程式啟動失敗: {e}")
         shutdown_scheduler()
-        raise
+        raiseimport os
+import json
+import logging
+from datetime import datetime, timedelta
+from flask import Flask, request, abort
+
+# 嘗試使用 LINE Bot SDK v3，如果失敗則回退到 v2
+try:
+    from linebot.v3.webhook import WebhookHandler
+    from linebot.v3.exceptions import InvalidSignatureError
+    from linebot.v3.messaging import (
+        Configuration, ApiClient, MessagingApi,
+        ReplyMessageRequest, TextMessage, PushMessageRequest
+    )
+    from linebot.v3.webhooks import MessageEvent, TextMessageContent
+    LINEBOT_SDK_VERSION = 3
+    logger = logging.getLogger(__name__)
+    logger.info("使用 LINE Bot SDK v3")
+except ImportError:
+    # 回退到 v2
+    from linebot import LineBotApi, WebhookHandler
+    from linebot.exceptions import InvalidSignatureError
+    from linebot.models import MessageEvent, TextMessage, TextSendMessage
+    LINEBOT_SDK_VERSION = 2
+    logger = logging.getLogger(__name__)
+    logger.info("回退到 LINE Bot SDK v2")
+
+import gspread
+from google.oauth2.service_account import Credentials
+from apscheduler.schedulers.background import BackgroundScheduler
+import pytz
+import re
+from threading import Timer
+import atexit
+from calendar import monthrange
+
+# 設定日誌
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# LINE Bot 驗證資料
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+
+# 檢查必要的環境變數
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    logger.error("缺少 LINE Bot 環境變數")
+    raise ValueError("請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET 環境變數")
+
+# 初始化 LINE Bot API（根據版本）
+if LINEBOT_SDK_VERSION == 3:
+    try:
+        configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
+        api_client = ApiClient(configuration)
+        line_bot_api = MessagingApi(api_client)
+        handler = WebhookHandler(LINE_CHANNEL_SECRET)
+    except Exception as e:
+        logger.error(f"LINE Bot SDK v3 初始化失敗: {e}")
+        # 如果 v3 初始化失敗，嘗試 v2
+        LINEBOT_SDK_VERSION = 2
+        
+if LINEBOT_SDK_VERSION == 2:
+    line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+    handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Google Sheets 設定
+GOOGLE_CREDENTIALS = os.getenv("GOOGLE_CREDENTIALS")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+
+# 如果沒有設定 Google Sheets 相關環境變數，使用模擬模式
+if not GOOGLE_CREDENTIALS or not SPREADSHEET_ID:
+    logger.warning("未設定 GOOGLE_CREDENTIALS 或 SPREADSHEET_ID，將使用記憶體模式運行")
+    USE_GOOGLE_SHEETS = False
+else:
+    USE_GOOGLE_SHEETS = True
+
+# 時區設定
+TZ = pytz.timezone('Asia/Taipei')
+
+# 記憶體儲存（當無法使用 Google Sheets 時）
+memory_storage = []
+
+class ScheduleManager:
+    def __init__(self):
+        self.gc = None
+        self.sheet = None
+        if USE_GOOGLE_SHEETS:
+            self.setup_google_sheets()
+    
+    def setup_google_sheets(self):
+        """設定 Google Sheets 連接"""
+        try:
+            credentials_dict = json.loads(GOOGLE_CREDENTIALS)
+            creds = Credentials.from_service_account_info(
+                credentials_dict,
+                scopes=['https://www.googleapis.com/auth/spreadsheets']
+            )
+            self.gc = gspread.authorize(creds)
+            self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
+            
+            # 確保表頭存在
+            headers = ['ID', '日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID', '狀態']
+            try:
+                existing_headers = self.sheet.row_values(1)
+                if not existing_headers or len(existing_headers) < len(headers):
+                    if existing_headers:
+                        self.sheet.update('A1:H1', [headers])
+                    else:
+                        self.sheet.insert_row(headers, 1)
+                logger.info("Google Sheets 表頭設定完成")
+            except Exception as e:
+                logger.error(f"設定表頭時發生錯誤: {e}")
+                
+            logger.info("Google Sheets 連接成功")
+            
+            # 測試寫入權限
+            try:
+                test_row = len(self.sheet.get_all_values()) + 1
+                logger.info(f"Sheet 目前有 {test_row - 1} 行資料")
+            except Exception as e:
+                logger.error(f"讀取 Sheet 資料時發生錯誤: {e}")
+                
+        except Exception as e:
+            logger.error(f"Google Sheets 連接失敗: {e}")
+            raise
+    
+    def add_schedule(self, date_str, time_str, content, user_id, reminder=None):
+        """新增行程"""
+        try:
+            # 驗證日期格式
+            schedule_date = datetime.strptime(date_str, '%Y-%m-%d')
+            
+            # 驗證時間格式（如果有提供）
+            if time_str:
+                datetime.strptime(time_str, '%H:%M')
+                
+            # 檢查是否為過去的日期
+            today = datetime.now(TZ).date()
+            if schedule_date.date() < today:
+                logger.warning(f"嘗試新增過去的日期: {date_str}")
+                return "過去日期"
+            
+            created_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')
+            
+            if USE_GOOGLE_SHEETS and self.sheet:
+                try:
+                    # 產生唯一 ID
+                    schedule_id = f"S{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                    
+                    row = [schedule_id, date_str, time_str or '', content, reminder or '', created_time, user_id, '有效']
+                    
+                    # 使用 append_row 方法
+                    self.sheet.append_row(row)
+                    logger.info(f"成功寫入 Google Sheets: {schedule_id}")
+                    
+                    # 驗證寫入
+                    try:
+                        all_records = self.sheet.get_all_records()
+                        latest_record = all_records[-1] if all_records else None
+                        if latest_record and latest_record.get('ID') == schedule_id:
+                            logger.info(f"驗證寫入成功: {schedule_id}")
+                        else:
+                            logger.warning(f"寫入驗證失敗: {schedule_id}")
+                    except Exception as e:
+                        logger.error(f"驗證寫入時發生錯誤: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"寫入 Google Sheets 失敗: {e}")
+                    # 如果寫入失敗，回退到記憶體模式
+                    schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                    schedule = {
+                        'ID': schedule_id,
+                        '日期': date_str,
+                        '時間': time_str or '',
+                        '行程內容': content,
+                        '提醒設定': reminder or '',
+                        '建立時間': created_time,
+                        'LINE用戶ID': user_id,
+                        '狀態': '有效'
+                    }
+                    memory_storage.append(schedule)
+                    logger.info(f"回退到記憶體模式儲存: {schedule_id}")
+            else:
+                # 記憶體模式
+                schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                schedule = {
+                    'ID': schedule_id,
+                    '日期': date_str,
+                    '時間': time_str or '',
+                    '行程內容': content,
+                    '提醒設定': reminder or '',
+                    '建立時間': created_time,
+                    'LINE用戶ID': user_id,
+                    '狀態': '有效'
+                }
+                memory_storage.append(schedule)
+            
+            logger.info(f"成功新增行程: {user_id} - {date_str} {time_str} {content} (ID: {schedule_id})")
+            return schedule_id  # 返回行程 ID
+        except ValueError as e:
+            logger.error(f"日期時間格式錯誤: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"新增行程失敗: {e}")
+            return False
+    
+    def get_schedules_by_date_range(self, start_date, end_date, user_id=None):
+        """取得指定日期範圍的行程"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            schedules = []
+            
+            for record in all_records:
+                if not record.get('日期') or not record.get('行程內容'):
+                    continue
+                    
+                if record.get('狀態') == '已刪除':
+                    continue
+                    
+                if user_id and record.get('LINE用戶ID') != user_id:
+                    continue
+                
+                try:
+                    schedule_date = datetime.strptime(record['日期'], '%Y-%m-%d').date()
+                    if start_date <= schedule_date <= end_date:
+                        schedules.append(record)
+                except ValueError:
+                    logger.warning(f"日期格式錯誤: {record.get('日期')}")
+                    continue
+            
+            return sorted(schedules, key=lambda x: (x['日期'], x.get('時間', '')))
+        except Exception as e:
+            logger.error(f"取得行程失敗: {e}")
+            return []
+    
+    def get_today_schedules(self, user_id):
+        """取得今日行程"""
+        today = datetime.now(TZ).date()
+        return self.get_schedules_by_date_range(today, today, user_id)
+    
+    def get_tomorrow_schedules(self, user_id):
+        """取得明日行程"""
+        tomorrow = datetime.now(TZ).date() + timedelta(days=1)
+        return self.get_schedules_by_date_range(tomorrow, tomorrow, user_id)
+    
+    def get_this_week_schedules(self, user_id):
+        """取得本週行程"""
+        today = datetime.now(TZ).date()
+        days_since_monday = today.weekday()
+        this_monday = today - timedelta(days=days_since_monday)
+        this_sunday = this_monday + timedelta(days=6)
+        return self.get_schedules_by_date_range(this_monday, this_sunday, user_id)
+    
+    def get_next_week_schedules(self, user_id):
+        """取得下週行程"""
+        today = datetime.now(TZ).date()
+        days_until_next_monday = 7 - today.weekday()
+        next_monday = today + timedelta(days=days_until_next_monday)
+        next_sunday = next_monday + timedelta(days=6)
+        return self.get_schedules_by_date_range(next_monday, next_sunday, user_id)
+    
+    def get_this_month_schedules(self, user_id):
+        """取得本月行程"""
+        today = datetime.now(TZ).date()
+        this_month_start = today.replace(day=1)
+        _, last_day = monthrange(today.year, today.month)
+        this_month_end = today.replace(day=last_day)
+        return self.get_schedules_by_date_range(this_month_start, this_month_end, user_id)
+    
+    def get_next_month_schedules(self, user_id):
+        """取得下個月行程"""
+        today = datetime.now(TZ).date()
+        
+        if today.month == 12:
+            next_month_start = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            next_month_start = today.replace(month=today.month + 1, day=1)
+        
+        year = next_month_start.year
+        month = next_month_start.month
+        _, last_day = monthrange(year, month)
+        next_month_end = next_month_start.replace(day=last_day)
+        
+        return self.get_schedules_by_date_range(next_month_start, next_month_end, user_id)
+    
+    def get_next_year_schedules(self, user_id):
+        """取得明年行程"""
+        today = datetime.now(TZ).date()
+        next_year_start = today.replace(year=today.year + 1, month=1, day=1)
+        next_year_end = today.replace(year=today.year + 1, month=12, day=31)
+        return self.get_schedules_by_date_range(next_year_start, next_year_end, user_id)
+    
+    def get_recent_schedules(self, user_id, days=7):
+        """取得最近N天的行程"""
+        today = datetime.now(TZ).date()
+        end_date = today + timedelta(days=days-1)
+        return self.get_schedules_by_date_range(today, end_date, user_id)
+    
+    def get_schedule_by_id(self, schedule_id, user_id=None):
+        """根據 ID 查詢特定行程"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            for record in all_records:
+                if (record.get('ID') == schedule_id and 
+                    record.get('狀態') != '已刪除'):
+                    
+                    # 如果指定了 user_id，則檢查是否為該用戶的行程
+                    if user_id and record.get('LINE用戶ID') != user_id:
+                        return None
+                    
+                    return record
+            
+            return None
+        except Exception as e:
+            logger.error(f"查詢行程 ID 失敗: {e}")
+            return None
+    
+    def get_user_schedules_with_id(self, user_id, limit=10):
+        """取得用戶最近的行程（包含 ID）"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            user_schedules = []
+            
+            for record in all_records:
+                if (record.get('LINE用戶ID') == user_id and 
+                    record.get('狀態') != '已刪除'):
+                    user_schedules.append(record)
+            
+            # 按建立時間排序，最新的在前
+            user_schedules.sort(key=lambda x: x.get('建立時間', ''), reverse=True)
+            
+            return user_schedules[:limit]
+        except Exception as e:
+            logger.error(f"查詢用戶行程失敗: {e}")
+            return []
+    
+    def delete_schedule_by_id(self, schedule_id, user_id):
+        """根據 ID 刪除行程"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+                row_num = 2  # 從第二行開始（第一行是表頭）
+                
+                for record in all_records:
+                    if (record.get('ID') == schedule_id and
+                        record.get('LINE用戶ID') == user_id and
+                        record.get('狀態') != '已刪除'):
+                        
+                        # 標記為已刪除
+                        self.sheet.update(f'H{row_num}', '已刪除')
+                        logger.info(f"成功刪除行程 ID: {schedule_id}")
+                        return record
+                    row_num += 1
+            else:
+                # 記憶體模式刪除
+                for record in memory_storage:
+                    if (record.get('ID') == schedule_id and
+                        record.get('LINE用戶ID') == user_id and
+                        record.get('狀態') != '已刪除'):
+                        
+                        record['狀態'] = '已刪除'
+                        logger.info(f"成功刪除行程 ID: {schedule_id}")
+                        return record
+            
+            return None
+        except Exception as e:
+            logger.error(f"刪除行程 ID 失敗: {e}")
+            return None
+    
+    def delete_schedule(self, user_id, date_str, content_keyword):
+        """刪除指定行程（原有方法保留）"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+                row_num = 2
+                
+                for record in all_records:
+                    if (record.get('LINE用戶ID') == user_id and
+                        record.get('日期') == date_str and
+                        content_keyword in record.get('行程內容', '') and
+                        record.get('狀態') != '已刪除'):
+                        
+                        self.sheet.update(f'H{row_num}', '已刪除')
+                        logger.info(f"成功刪除行程: {user_id} - {date_str} {content_keyword}")
+                        return True
+                    row_num += 1
+            else:
+                # 記憶體模式刪除
+                for record in memory_storage:
+                    if (record.get('LINE用戶ID') == user_id and
+                        record.get('日期') == date_str and
+                        content_keyword in record.get('行程內容', '') and
+                        record.get('狀態') != '已刪除'):
+                        
+                        record['狀態'] = '已刪除'
+                        logger.info(f"成功刪除行程: {user_id} - {date_str} {content_keyword}")
+                        return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"刪除行程失敗: {e}")
+            return False
+    
+    def get_two_weeks_later_schedules(self):
+        """取得兩週後的行程（用於週五推播）"""
+        try:
+            today = datetime.now(TZ).date()
+            two_weeks_later = today + timedelta(weeks=2)
+            start_of_week = two_weeks_later - timedelta(days=two_weeks_later.weekday())
+            end_of_week = start_of_week + timedelta(days=6)
+            
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            schedules_by_user = {}
+            
+            for record in all_records:
+                if (not record.get('日期') or 
+                    not record.get('行程內容') or 
+                    not record.get('LINE用戶ID') or
+                    record.get('狀態') == '已刪除'):
+                    continue
+                    
+                try:
+                    schedule_date = datetime.strp
