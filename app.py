@@ -103,12 +103,12 @@ class ScheduleManager:
             self.sheet = self.gc.open_by_key(SPREADSHEET_ID).sheet1
             
             # 確保表頭存在
-            headers = ['日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID', '狀態']
+            headers = ['ID', '日期', '時間', '行程內容', '提醒設定', '建立時間', 'LINE用戶ID', '狀態']
             try:
                 existing_headers = self.sheet.row_values(1)
                 if not existing_headers or len(existing_headers) < len(headers):
                     if existing_headers:
-                        self.sheet.update('A1:G1', [headers])
+                        self.sheet.update('A1:H1', [headers])
                     else:
                         self.sheet.insert_row(headers, 1)
                 logger.info("Google Sheets 表頭設定完成")
@@ -116,6 +116,14 @@ class ScheduleManager:
                 logger.error(f"設定表頭時發生錯誤: {e}")
                 
             logger.info("Google Sheets 連接成功")
+            
+            # 測試寫入權限
+            try:
+                test_row = len(self.sheet.get_all_values()) + 1
+                logger.info(f"Sheet 目前有 {test_row - 1} 行資料")
+            except Exception as e:
+                logger.error(f"讀取 Sheet 資料時發生錯誤: {e}")
+                
         except Exception as e:
             logger.error(f"Google Sheets 連接失敗: {e}")
             raise
@@ -139,11 +147,48 @@ class ScheduleManager:
             created_time = datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')
             
             if USE_GOOGLE_SHEETS and self.sheet:
-                row = [date_str, time_str or '', content, reminder or '', created_time, user_id, '有效']
-                self.sheet.append_row(row)
+                try:
+                    # 產生唯一 ID
+                    schedule_id = f"S{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                    
+                    row = [schedule_id, date_str, time_str or '', content, reminder or '', created_time, user_id, '有效']
+                    
+                    # 使用 append_row 方法
+                    self.sheet.append_row(row)
+                    logger.info(f"成功寫入 Google Sheets: {schedule_id}")
+                    
+                    # 驗證寫入
+                    try:
+                        all_records = self.sheet.get_all_records()
+                        latest_record = all_records[-1] if all_records else None
+                        if latest_record and latest_record.get('ID') == schedule_id:
+                            logger.info(f"驗證寫入成功: {schedule_id}")
+                        else:
+                            logger.warning(f"寫入驗證失敗: {schedule_id}")
+                    except Exception as e:
+                        logger.error(f"驗證寫入時發生錯誤: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"寫入 Google Sheets 失敗: {e}")
+                    # 如果寫入失敗，回退到記憶體模式
+                    schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
+                    schedule = {
+                        'ID': schedule_id,
+                        '日期': date_str,
+                        '時間': time_str or '',
+                        '行程內容': content,
+                        '提醒設定': reminder or '',
+                        '建立時間': created_time,
+                        'LINE用戶ID': user_id,
+                        '狀態': '有效'
+                    }
+                    memory_storage.append(schedule)
+                    logger.info(f"回退到記憶體模式儲存: {schedule_id}")
             else:
-                # 使用記憶體儲存
+                # 記憶體模式
+                schedule_id = f"M{datetime.now(TZ).strftime('%Y%m%d%H%M%S')}{user_id[-4:]}"
                 schedule = {
+                    'ID': schedule_id,
                     '日期': date_str,
                     '時間': time_str or '',
                     '行程內容': content,
@@ -154,8 +199,8 @@ class ScheduleManager:
                 }
                 memory_storage.append(schedule)
             
-            logger.info(f"成功新增行程: {user_id} - {date_str} {time_str} {content}")
-            return True
+            logger.info(f"成功新增行程: {user_id} - {date_str} {time_str} {content} (ID: {schedule_id})")
+            return schedule_id  # 返回行程 ID
         except ValueError as e:
             logger.error(f"日期時間格式錯誤: {e}")
             return False
@@ -253,14 +298,92 @@ class ScheduleManager:
         next_year_end = today.replace(year=today.year + 1, month=12, day=31)
         return self.get_schedules_by_date_range(next_year_start, next_year_end, user_id)
     
+    def get_schedule_by_id(self, schedule_id, user_id=None):
+        """根據 ID 查詢特定行程"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            for record in all_records:
+                if (record.get('ID') == schedule_id and 
+                    record.get('狀態') != '已刪除'):
+                    
+                    # 如果指定了 user_id，則檢查是否為該用戶的行程
+                    if user_id and record.get('LINE用戶ID') != user_id:
+                        return None
+                    
+                    return record
+            
+            return None
+        except Exception as e:
+            logger.error(f"查詢行程 ID 失敗: {e}")
+            return None
+    
+    def get_user_schedules_with_id(self, user_id, limit=10):
+        """取得用戶最近的行程（包含 ID）"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+            else:
+                all_records = memory_storage
+            
+            user_schedules = []
+            
+            for record in all_records:
+                if (record.get('LINE用戶ID') == user_id and 
+                    record.get('狀態') != '已刪除'):
+                    user_schedules.append(record)
+            
+            # 按建立時間排序，最新的在前
+            user_schedules.sort(key=lambda x: x.get('建立時間', ''), reverse=True)
+            
+            return user_schedules[:limit]
+        except Exception as e:
+            logger.error(f"查詢用戶行程失敗: {e}")
+            return []
+    
     def get_recent_schedules(self, user_id, days=7):
         """取得最近N天的行程"""
         today = datetime.now(TZ).date()
         end_date = today + timedelta(days=days-1)
         return self.get_schedules_by_date_range(today, end_date, user_id)
     
+    def delete_schedule_by_id(self, schedule_id, user_id):
+        """根據 ID 刪除行程"""
+        try:
+            if USE_GOOGLE_SHEETS and self.sheet:
+                all_records = self.sheet.get_all_records()
+                row_num = 2  # 從第二行開始（第一行是表頭）
+                
+                for record in all_records:
+                    if (record.get('ID') == schedule_id and
+                        record.get('LINE用戶ID') == user_id and
+                        record.get('狀態') != '已刪除'):
+                        
+                        # 標記為已刪除
+                        self.sheet.update(f'H{row_num}', '已刪除')
+                        logger.info(f"成功刪除行程 ID: {schedule_id}")
+                        return record
+                    row_num += 1
+            else:
+                # 記憶體模式刪除
+                for record in memory_storage:
+                    if (record.get('ID') == schedule_id and
+                        record.get('LINE用戶ID') == user_id and
+                        record.get('狀態') != '已刪除'):
+                        
+                        record['狀態'] = '已刪除'
+                        logger.info(f"成功刪除行程 ID: {schedule_id}")
+                        return record
+            
+            return None
+        except Exception as e:
+            logger.error(f"刪除行程 ID 失敗: {e}")
+            return None
     def delete_schedule(self, user_id, date_str, content_keyword):
-        """刪除指定行程"""
+        """刪除指定行程（原有方法保留）"""
         try:
             if USE_GOOGLE_SHEETS and self.sheet:
                 all_records = self.sheet.get_all_records()
@@ -272,7 +395,7 @@ class ScheduleManager:
                         content_keyword in record.get('行程內容', '') and
                         record.get('狀態') != '已刪除'):
                         
-                        self.sheet.update(f'G{row_num}', '已刪除')
+                        self.sheet.update(f'H{row_num}', '已刪除')
                         logger.info(f"成功刪除行程: {user_id} - {date_str} {content_keyword}")
                         return True
                     row_num += 1
@@ -613,6 +736,60 @@ def handle_message(event):
             schedules = schedule_manager.get_recent_schedules(user_id, 7)
             reply_text = format_schedules(schedules, "📅 近期行程（7天內）")
         
+        # 查詢行程 ID
+        elif text.startswith("查詢ID") or text.startswith("查詢id"):
+            content = text.replace('查詢ID', '').replace('查詢id', '').strip()
+            if content:
+                schedule = schedule_manager.get_schedule_by_id(content, user_id)
+                if schedule:
+                    date = schedule.get('日期', '')
+                    time = schedule.get('時間', '') or '全天'
+                    content_text = schedule.get('行程內容', '')
+                    created_time = schedule.get('建立時間', '')
+                    schedule_id = schedule.get('ID', '')
+                    
+                    try:
+                        date_obj = datetime.strptime(date, '%Y-%m-%d')
+                        weekday = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
+                        friendly_date = f"{date_obj.month}/{date_obj.day} (週{weekday})"
+                    except:
+                        friendly_date = date
+                    
+                    if time != '全天':
+                        reply_text = f"🔍 行程詳細資訊\n\n🆔 ID: {schedule_id}\n📅 日期: {friendly_date}\n⏰ 時間: {time}\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
+                    else:
+                        reply_text = f"🔍 行程詳細資訊\n\n🆔 ID: {schedule_id}\n📅 日期: {friendly_date} (全天)\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
+                else:
+                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認 ID 是否正確，或該行程是否為您建立的"
+            else:
+                reply_text = "❌ 請輸入要查詢的行程 ID，格式：查詢ID S20240101120000001"
+        
+        # 我的行程 ID 列表
+        elif text in ["我的行程", "行程列表", "行程ID"]:
+            schedules = schedule_manager.get_user_schedules_with_id(user_id, 10)
+            if schedules:
+                reply_text = "📋 您的行程列表（最近10筆）\n\n"
+                for i, schedule in enumerate(schedules, 1):
+                    date = schedule.get('日期', '')
+                    time = schedule.get('時間', '') or '全天'
+                    content = schedule.get('行程內容', '')
+                    schedule_id = schedule.get('ID', '')
+                    
+                    try:
+                        date_obj = datetime.strptime(date, '%Y-%m-%d')
+                        friendly_date = f"{date_obj.month}/{date_obj.day}"
+                    except:
+                        friendly_date = date
+                    
+                    if time != '全天':
+                        reply_text += f"{i}. 📅 {friendly_date} {time}\n   📝 {content}\n   🆔 {schedule_id}\n\n"
+                    else:
+                        reply_text += f"{i}. 📅 {friendly_date} (全天)\n   📝 {content}\n   🆔 {schedule_id}\n\n"
+                
+                reply_text += "💡 使用「查詢ID [ID號碼]」查看詳細資訊\n💡 使用「刪除ID [ID號碼]」刪除特定行程"
+            else:
+                reply_text = "📋 您目前沒有任何行程\n\n💡 輸入「今天10點開會」開始新增行程"
+        
         # 新增行程功能
         elif text.startswith("新增行程") or is_schedule_input(text):
             if not text.startswith("新增行程"):
@@ -622,15 +799,16 @@ def handle_message(event):
             
             if date_str and content:
                 success = schedule_manager.add_schedule(date_str, time_str, content, user_id)
-                if success == True:
+                if isinstance(success, str) and success.startswith(('S', 'M')):
+                    # 成功新增，返回了行程 ID
                     time_display = f" {time_str}" if time_str else " (全天)"
                     try:
                         date_obj = datetime.strptime(date_str, '%Y-%m-%d')
                         weekday = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
                         friendly_date = f"{date_obj.month}/{date_obj.day} (週{weekday})"
-                        reply_text = f"✅ 行程已新增成功！\n📅 {friendly_date}{time_display}\n📝 {content}"
+                        reply_text = f"✅ 行程已新增成功！\n📅 {friendly_date}{time_display}\n📝 {content}\n🆔 行程ID: {success}"
                     except:
-                        reply_text = f"✅ 行程已新增成功！\n📅 {date_str}{time_display}\n📝 {content}"
+                        reply_text = f"✅ 行程已新增成功！\n📅 {date_str}{time_display}\n📝 {content}\n🆔 行程ID: {success}"
                 elif success == "過去日期":
                     reply_text = "⚠️ 無法新增過去的日期，請選擇今天或未來的日期"
                 else:
@@ -686,6 +864,26 @@ def handle_message(event):
             else:
                 reply_text = "❌ 請輸入要刪除的行程，格式：刪除行程 7/14 關鍵字"
         
+        # 根據 ID 刪除行程
+        elif text.startswith("刪除ID") or text.startswith("刪除id"):
+            content = text.replace('刪除ID', '').replace('刪除id', '').strip()
+            if content:
+                deleted_schedule = schedule_manager.delete_schedule_by_id(content, user_id)
+                if deleted_schedule:
+                    date = deleted_schedule.get('日期', '')
+                    content_text = deleted_schedule.get('行程內容', '')
+                    try:
+                        date_obj = datetime.strptime(date, '%Y-%m-%d')
+                        weekday = ['一', '二', '三', '四', '五', '六', '日'][date_obj.weekday()]
+                        friendly_date = f"{date_obj.month}/{date_obj.day} (週{weekday})"
+                    except:
+                        friendly_date = date
+                    reply_text = f"✅ 已成功刪除行程\n📅 {friendly_date}\n📝 {content_text}\n🆔 ID: {content}"
+                else:
+                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認 ID 是否正確，或該行程是否已被刪除"
+            else:
+                reply_text = "❌ 請輸入要刪除的行程 ID，格式：刪除ID S20240101120000001"
+        
         # 功能菜單
         elif text in ["功能", "menu", "選單", "菜單"]:
             reply_text = ("🎯 功能選單\n\n"
@@ -693,11 +891,12 @@ def handle_message(event):
                          "📝 新增行程 → 輸入「新增說明」\n"
                          "🔍 查詢行程 → 輸入「查詢說明」\n"
                          "🗑️ 刪除行程 → 輸入「刪除說明」\n"
+                         "🆔 行程ID管理 → 輸入「ID說明」\n"
                          "⏰ 倒數計時 → 輸入「倒數說明」\n"
                          "🔧 系統功能 → 輸入「系統說明」\n"
                          "📖 完整說明 → 輸入「完整說明」\n\n"
                          "💡 提示：您也可以直接輸入行程資訊，例如：\n"
-                         "「今天10點開會」、「7/14 聚餐」")
+                         "「今天10點開會」、「7/14 聚餐」")「今天10點開會」、「7/14 聚餐」")
         
         # 新增行程說明
         elif text in ["新增說明", "新增幫助", "新增功能"]:
