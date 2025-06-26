@@ -558,9 +558,30 @@ def handle_message(event):
             schedules = schedule_manager.get_recent_schedules(user_id, 7)
             reply_text = format_schedules(schedules, "📅 近期行程（7天內）")
         
-        # ID 查詢功能
-        elif text.startswith("查詢ID") or text.startswith("查詢id"):
-            content = text.replace('查詢ID', '').replace('查詢id', '').strip()
+        # 查詢 LINE ID 功能
+        elif text in ["查詢ID", "查詢id", "ID", "id", "我的ID", "群組ID"]:
+            # 判斷是群組還是個人
+            if hasattr(event.source, 'group_id') and event.source.group_id:
+                source_type = "群組"
+                source_id = event.source.group_id
+            elif hasattr(event.source, 'room_id') and event.source.room_id:
+                source_type = "聊天室"
+                source_id = event.source.room_id
+            else:
+                source_type = "個人"
+                source_id = event.source.user_id
+            
+            reply_text = (f"🆔 LINE ID 資訊\n\n"
+                         f"📱 類型: {source_type}\n"
+                         f"🆔 {source_type}ID: {source_id}\n"
+                         f"👤 您的用戶ID: {user_id}\n\n"
+                         f"💡 提示：\n"
+                         f"• 用戶ID用於個人行程管理\n"
+                         f"• {source_type}ID用於識別對話來源")
+        
+        # 查詢行程ID功能（原本的查詢ID功能）
+        elif text.startswith("查詢行程ID") or text.startswith("查詢行程id"):
+            content = text.replace('查詢行程ID', '').replace('查詢行程id', '').strip()
             if content:
                 schedule = schedule_manager.get_schedule_by_id(content, user_id)
                 if schedule:
@@ -578,13 +599,13 @@ def handle_message(event):
                         friendly_date = date
                     
                     if time != '全天':
-                        reply_text = f"🔍 行程詳細資訊\n\n🆔 ID: {schedule_id}\n📅 日期: {friendly_date}\n⏰ 時間: {time}\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
+                        reply_text = f"🔍 行程詳細資訊\n\n🆔 行程ID: {schedule_id}\n📅 日期: {friendly_date}\n⏰ 時間: {time}\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
                     else:
-                        reply_text = f"🔍 行程詳細資訊\n\n🆔 ID: {schedule_id}\n📅 日期: {friendly_date} (全天)\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
+                        reply_text = f"🔍 行程詳細資訊\n\n🆔 行程ID: {schedule_id}\n📅 日期: {friendly_date} (全天)\n📝 內容: {content_text}\n🕐 建立時間: {created_time}"
                 else:
-                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認 ID 是否正確，或該行程是否為您建立的"
+                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認行程ID是否正確，或該行程是否為您建立的"
             else:
-                reply_text = "❌ 請輸入要查詢的行程 ID，格式：查詢ID S20240101120000001"
+                reply_text = "❌ 請輸入要查詢的行程 ID，格式：查詢行程ID S20240101120000001"
         
         # 我的行程列表
         elif text in ["我的行程", "行程列表", "行程ID"]:
@@ -608,7 +629,7 @@ def handle_message(event):
                     else:
                         reply_text += f"{i}. 📅 {friendly_date} (全天)\n   📝 {content}\n   🆔 {schedule_id}\n\n"
                 
-                reply_text += "💡 使用「查詢ID [ID號碼]」查看詳細資訊\n💡 使用「刪除ID [ID號碼]」刪除特定行程"
+                reply_text += "💡 使用「查詢行程ID [ID號碼]」查看詳細資訊\n💡 使用「刪除行程ID [ID號碼]」刪除特定行程"
             else:
                 reply_text = "📋 您目前沒有任何行程\n\n💡 輸入「今天10點開會」開始新增行程"
         
@@ -644,9 +665,9 @@ def handle_message(event):
                              "• 6月30號 下午2點 盤點\n"
                              "• 12月25號 聖誕節")
         
-        # 刪除ID功能
-        elif text.startswith("刪除ID") or text.startswith("刪除id"):
-            content = text.replace('刪除ID', '').replace('刪除id', '').strip()
+        # 刪除行程ID功能（原本的刪除ID功能）
+        elif text.startswith("刪除行程ID") or text.startswith("刪除行程id"):
+            content = text.replace('刪除行程ID', '').replace('刪除行程id', '').strip()
             if content:
                 deleted_schedule = schedule_manager.delete_schedule_by_id(content, user_id)
                 if deleted_schedule:
@@ -658,30 +679,33 @@ def handle_message(event):
                         friendly_date = f"{date_obj.month}/{date_obj.day} (週{weekday})"
                     except:
                         friendly_date = date
-                    reply_text = f"✅ 已成功刪除行程\n📅 {friendly_date}\n📝 {content_text}\n🆔 ID: {content}"
+                    reply_text = f"✅ 已成功刪除行程\n📅 {friendly_date}\n📝 {content_text}\n🆔 行程ID: {content}"
                 else:
-                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認 ID 是否正確，或該行程是否已被刪除"
+                    reply_text = f"❌ 找不到行程 ID: {content}\n請確認行程ID是否正確，或該行程是否已被刪除"
             else:
-                reply_text = "❌ 請輸入要刪除的行程 ID，格式：刪除ID S20240101120000001"
+                reply_text = "❌ 請輸入要刪除的行程 ID，格式：刪除行程ID S20240101120000001"
         
         # 功能說明
         elif text in ["功能", "menu", "選單", "菜單"]:
             reply_text = ("🎯 功能選單\n\n"
                          "📝 新增行程：直接輸入「今天10點開會」\n"
                          "🔍 查詢行程：「今日行程」「明日行程」等\n"
-                         "🆔 管理行程：「我的行程」查看所有行程ID\n"
+                         "🆔 查詢ID：「查詢ID」查看LINE群組/個人ID\n"
+                         "📋 管理行程：「我的行程」查看所有行程ID\n"
                          "⏰ 倒數計時：「倒數 5 分鐘」\n"
                          "🔧 系統狀態：「狀態」\n\n"
                          "💡 快速範例：\n"
                          "• 明天10點開會\n"
-                         "• 查詢ID S123...\n"
-                         "• 刪除ID S123...")
+                         "• 查詢ID（查看LINE ID）\n"
+                         "• 查詢行程ID S123...（查看行程詳情）\n"
+                         "• 刪除行程ID S123...（刪除行程）")
         
         elif text in ["幫助", "help", "使用說明", "?"]:
             reply_text = ("🤖 LINE Bot 行程管理系統\n\n"
                          "⚡ 快速使用：\n"
                          "• 明天10點開會 - 新增行程\n"
                          "• 今日行程 - 查詢今天行程\n"
+                         "• 查詢ID - 查看LINE群組/個人ID\n"
                          "• 我的行程 - 查看所有行程及ID\n"
                          "• 倒數 5 分鐘 - 開始倒數計時\n\n"
                          "💡 輸入「功能」查看完整選單")
