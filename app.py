@@ -248,31 +248,76 @@ class ScheduleManager:
     
     def get_schedules_by_date_range(self, start_date, end_date, user_id=None):
         try:
+            logger.info(f"查詢行程範圍: {start_date} 到 {end_date}, 用戶: {user_id}")
+            
+            # 優先從 Google Sheets 讀取
             if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
+                try:
+                    logger.info("從 Google Sheets 讀取行程...")
+                    all_records = self.sheet.get_all_records()
+                    logger.info(f"從 Google Sheets 讀取到 {len(all_records)} 筆記錄")
+                    
+                    # 詳細記錄前幾筆資料以供偵錯
+                    if all_records:
+                        logger.info(f"前3筆記錄範例: {all_records[:3]}")
+                    
+                except Exception as e:
+                    logger.error(f"從 Google Sheets 讀取失敗: {e}")
+                    logger.info("回退到記憶體模式讀取")
+                    all_records = memory_storage
             else:
+                logger.info("使用記憶體模式讀取")
                 all_records = memory_storage
             
             schedules = []
+            processed_count = 0
+            
             for record in all_records:
+                processed_count += 1
+                
+                # 基本資料檢查
                 if not record.get('日期') or not record.get('行程內容'):
-                    continue
-                if record.get('狀態') == '已刪除':
-                    continue
-                if user_id and record.get('LINE用戶ID') != user_id:
+                    logger.debug(f"跳過空白記錄 {processed_count}: {record}")
                     continue
                 
+                # 狀態檢查
+                if record.get('狀態') == '已刪除':
+                    logger.debug(f"跳過已刪除記錄 {processed_count}: {record.get('ID')}")
+                    continue
+                
+                # 用戶檢查
+                if user_id and record.get('LINE用戶ID') != user_id:
+                    logger.debug(f"跳過其他用戶記錄 {processed_count}: {record.get('LINE用戶ID')} != {user_id}")
+                    continue
+                
+                # 日期範圍檢查
                 try:
                     schedule_date = datetime.strptime(record['日期'], '%Y-%m-%d').date()
                     if start_date <= schedule_date <= end_date:
                         schedules.append(record)
-                except ValueError:
-                    logger.warning(f"日期格式錯誤: {record.get('日期')}")
+                        logger.debug(f"符合條件的記錄: {record.get('ID')} - {record.get('日期')} - {record.get('行程內容')}")
+                    else:
+                        logger.debug(f"日期不在範圍內: {schedule_date} 不在 {start_date} ~ {end_date}")
+                except ValueError as date_e:
+                    logger.warning(f"日期格式錯誤 {processed_count}: {record.get('日期')} - {date_e}")
                     continue
             
-            return sorted(schedules, key=lambda x: (x['日期'], x.get('時間', '')))
+            logger.info(f"處理完成: 總記錄 {processed_count} 筆，符合條件 {len(schedules)} 筆")
+            
+            # 排序結果
+            sorted_schedules = sorted(schedules, key=lambda x: (x['日期'], x.get('時間', '')))
+            
+            if sorted_schedules:
+                logger.info(f"返回 {len(sorted_schedules)} 筆行程")
+                for i, schedule in enumerate(sorted_schedules[:3]):  # 記錄前3筆
+                    logger.info(f"結果 {i+1}: {schedule.get('ID')} - {schedule.get('日期')} {schedule.get('時間')} - {schedule.get('行程內容')}")
+            else:
+                logger.info("沒有找到符合條件的行程")
+            
+            return sorted_schedules
+            
         except Exception as e:
-            logger.error(f"取得行程失敗: {e}")
+            logger.error(f"查詢行程失敗: {e}")
             return []
     
     def get_today_schedules(self, user_id):
@@ -330,35 +375,91 @@ class ScheduleManager:
     
     def get_schedule_by_id(self, schedule_id, user_id=None):
         try:
+            logger.info(f"查詢行程ID: {schedule_id}, 用戶: {user_id}")
+            
+            # 優先從 Google Sheets 讀取
             if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
+                try:
+                    logger.info("從 Google Sheets 查詢行程ID...")
+                    all_records = self.sheet.get_all_records()
+                    logger.info(f"讀取到 {len(all_records)} 筆記錄")
+                except Exception as e:
+                    logger.error(f"從 Google Sheets 讀取失敗: {e}")
+                    all_records = memory_storage
             else:
+                logger.info("使用記憶體模式查詢行程ID")
                 all_records = memory_storage
             
             for record in all_records:
                 if (record.get('ID') == schedule_id and record.get('狀態') != '已刪除'):
+                    logger.info(f"找到行程ID: {schedule_id}")
+                    
+                    # 如果指定了 user_id，檢查是否為該用戶的行程
                     if user_id and record.get('LINE用戶ID') != user_id:
+                        logger.warning(f"行程ID {schedule_id} 不屬於用戶 {user_id}")
                         return None
+                    
+                    logger.info(f"返回行程: {record.get('日期')} - {record.get('行程內容')}")
                     return record
+            
+            logger.info(f"未找到行程ID: {schedule_id}")
             return None
+            
         except Exception as e:
             logger.error(f"查詢行程 ID 失敗: {e}")
             return None
     
     def get_user_schedules_with_id(self, user_id, limit=10):
         try:
+            logger.info(f"查詢用戶行程: {user_id}, 限制: {limit}")
+            
+            # 優先從 Google Sheets 讀取
             if USE_GOOGLE_SHEETS and self.sheet:
-                all_records = self.sheet.get_all_records()
+                try:
+                    logger.info("從 Google Sheets 讀取用戶行程...")
+                    all_records = self.sheet.get_all_records()
+                    logger.info(f"讀取到 {len(all_records)} 筆總記錄")
+                except Exception as e:
+                    logger.error(f"從 Google Sheets 讀取失敗: {e}")
+                    all_records = memory_storage
             else:
+                logger.info("使用記憶體模式讀取用戶行程")
                 all_records = memory_storage
             
             user_schedules = []
-            for record in all_records:
-                if (record.get('LINE用戶ID') == user_id and record.get('狀態') != '已刪除'):
-                    user_schedules.append(record)
+            processed_count = 0
             
-            user_schedules.sort(key=lambda x: x.get('建立時間', ''), reverse=True)
-            return user_schedules[:limit]
+            for record in all_records:
+                processed_count += 1
+                
+                # 檢查是否為該用戶的有效行程
+                if (record.get('LINE用戶ID') == user_id and 
+                    record.get('狀態') != '已刪除' and
+                    record.get('行程內容')):  # 確保有行程內容
+                    user_schedules.append(record)
+                    logger.debug(f"找到用戶行程: {record.get('ID')} - {record.get('行程內容')}")
+            
+            logger.info(f"用戶 {user_id} 共有 {len(user_schedules)} 筆有效行程")
+            
+            # 按建立時間排序，最新的在前
+            try:
+                user_schedules.sort(key=lambda x: x.get('建立時間', ''), reverse=True)
+                logger.info("行程已按建立時間排序")
+            except Exception as sort_e:
+                logger.warning(f"排序失敗: {sort_e}")
+            
+            # 限制數量
+            limited_schedules = user_schedules[:limit]
+            
+            if limited_schedules:
+                logger.info(f"返回 {len(limited_schedules)} 筆用戶行程")
+                for i, schedule in enumerate(limited_schedules[:3]):  # 記錄前3筆
+                    logger.info(f"用戶行程 {i+1}: {schedule.get('ID')} - {schedule.get('日期')} - {schedule.get('行程內容')}")
+            else:
+                logger.info(f"用戶 {user_id} 沒有任何行程")
+            
+            return limited_schedules
+            
         except Exception as e:
             logger.error(f"查詢用戶行程失敗: {e}")
             return []
@@ -799,7 +900,56 @@ def handle_message(event):
                          "• 倒數 5 分鐘 - 開始倒數計時\n\n"
                          "💡 輸入「功能」查看完整選單")
         
-        elif text in ["狀態", "系統狀態", "status"]:
+        elif text in ["測試", "test", "偵錯", "debug"]:
+            try:
+                debug_info = "🔍 系統偵錯資訊\n\n"
+                
+                # 檢查環境變數
+                debug_info += f"🔑 Google Sheets 設定: {'✅ 已設定' if USE_GOOGLE_SHEETS else '❌ 未設定'}\n"
+                
+                if USE_GOOGLE_SHEETS and schedule_manager.sheet:
+                    try:
+                        # 讀取所有資料
+                        all_records = schedule_manager.sheet.get_all_records()
+                        debug_info += f"📊 Google Sheets 總記錄: {len(all_records)} 筆\n"
+                        
+                        # 統計用戶資料
+                        user_records = [r for r in all_records if r.get('LINE用戶ID') == user_id]
+                        debug_info += f"👤 您的記錄: {len(user_records)} 筆\n"
+                        
+                        # 有效記錄
+                        valid_records = [r for r in user_records if r.get('狀態') != '已刪除' and r.get('行程內容')]
+                        debug_info += f"✅ 有效行程: {len(valid_records)} 筆\n\n"
+                        
+                        # 顯示最近3筆記錄
+                        if valid_records:
+                            debug_info += "🗂️ 最近記錄:\n"
+                            for i, record in enumerate(valid_records[:3], 1):
+                                debug_info += f"{i}. ID: {record.get('ID', 'N/A')}\n"
+                                debug_info += f"   日期: {record.get('日期', 'N/A')}\n"
+                                debug_info += f"   內容: {record.get('行程內容', 'N/A')}\n"
+                                debug_info += f"   狀態: {record.get('狀態', 'N/A')}\n\n"
+                        else:
+                            debug_info += "📝 沒有找到有效記錄\n\n"
+                        
+                        # 測試今日行程查詢
+                        today = datetime.now(TZ).date()
+                        today_schedules = schedule_manager.get_today_schedules(user_id)
+                        debug_info += f"📅 今日行程查詢結果: {len(today_schedules)} 筆\n"
+                        
+                    except Exception as e:
+                        debug_info += f"❌ Google Sheets 讀取錯誤: {str(e)[:100]}\n"
+                else:
+                    # 記憶體模式統計
+                    memory_records = [r for r in memory_storage if r.get('LINE用戶ID') == user_id]
+                    debug_info += f"📱 記憶體模式記錄: {len(memory_records)} 筆\n"
+                
+                debug_info += f"\n🕐 檢查時間: {datetime.now(TZ).strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                reply_text = debug_info
+                
+            except Exception as e:
+                reply_text = f"🔍 偵錯功能錯誤: {str(e)}"
             try:
                 # 檢測 Google Sheets 連接狀態
                 if USE_GOOGLE_SHEETS and schedule_manager.sheet:
