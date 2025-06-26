@@ -78,6 +78,10 @@ def handle_message(event):
         message = TextMessage(text="請輸入指令，例如 debug 來測試連線")
         line_bot_api.reply_message(event.reply_token, [message])
 
+@app.route("/")
+def home():
+    return "✅ LINE Reminder Bot 正常運行中"
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
