@@ -90,11 +90,16 @@ def handle_poker_draw(user_id):
             display_card = poker_game.get_card_display(card)
             card_display.append(f"{i}. {display_card}")
         
+        # 台灣時區調整 (UTC+8)
+        from datetime import timezone, timedelta
+        taiwan_tz = timezone(timedelta(hours=8))
+        current_time = datetime.now(taiwan_tz)
+        
         # 組合回覆訊息
         reply = (
             f"🎴 撲克牌抽牌結果\n"
             f"====================\n"
-            f"🕐 抽牌時間：{datetime.now().strftime('%H:%M')}\n"
+            f"🕐 抽牌時間：{current_time.strftime('%H:%M')}\n"
             f"🎯 抽牌結果：\n\n"
             + "\n".join(card_display) + "\n\n"
             f"====================\n"
