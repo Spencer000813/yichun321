@@ -1,5 +1,6 @@
 import os
 import json
+import random
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 
@@ -35,6 +36,81 @@ sheet = gc.open_by_key(spreadsheet_id).sheet1
 # 設定要發送行程預覽的群組 ID
 TARGET_GROUP_ID = os.getenv("SCHEDULE_GROUP_ID", "C4e138aa0eb252daa89846daab0102e41")  # 將「你的群組ID」替換成實際的群組ID
 
+# 撲克牌遊戲類
+class PokerGame:
+    def __init__(self):
+        # 建立54張牌的牌組（包含鬼牌）
+        self.suits = ['♠', '♥', '♦', '♣']  # 黑桃、紅心、方塊、梅花
+        self.ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
+        self.jokers = ['鬼牌1', '鬼牌2']  # 兩張鬼牌
+    
+    def create_deck(self):
+        """建立完整的54張牌組"""
+        deck = []
+        
+        # 添加52張一般牌
+        for suit in self.suits:
+            for rank in self.ranks:
+                deck.append(f"{suit}{rank}")
+        
+        # 添加2張鬼牌
+        deck.extend(self.jokers)
+        
+        return deck
+    
+    def draw_cards(self, num_cards=5):
+        """隨機抽取指定數量的牌（不重複）"""
+        deck = self.create_deck()
+        random.shuffle(deck)
+        # 使用 random.sample 確保抽取的牌不會重複
+        if num_cards > len(deck):
+            num_cards = len(deck)  # 防止抽取數量超過牌組總數
+        return random.sample(deck, num_cards)
+    
+    def get_card_display(self, card):
+        """美化牌的顯示格式"""
+        if card in self.jokers:
+            return "🃏鬼牌"  # 統一顯示鬼牌
+        
+        # 直接返回原始牌面（紅心♥和方塊♦符號會自動顯示為紅色）
+        return card
+
+# 實例化撲克牌遊戲
+poker_game = PokerGame()
+
+def handle_poker_draw(user_id):
+    """處理撲克牌抽牌"""
+    try:
+        # 抽取5張牌（確保不重複）
+        drawn_cards = poker_game.draw_cards(5)
+        
+        # 美化牌面顯示
+        card_display = []
+        for i, card in enumerate(drawn_cards, 1):
+            display_card = poker_game.get_card_display(card)
+            card_display.append(f"{i}. {display_card}")
+        
+        # 組合回覆訊息
+        reply = (
+            f"🎴 撲克牌抽牌結果\n"
+            f"====================\n"
+            f"🕐 抽牌時間：{datetime.now().strftime('%H:%M')}\n"
+            f"🎯 抽牌結果：\n\n"
+            + "\n".join(card_display) + "\n\n"
+            f"====================\n"
+            f"🎴 抽牌完成！"
+        )
+        
+        return reply
+        
+    except Exception as e:
+        print(f"撲克牌遊戲錯誤：{e}")
+        return (
+            "😵 撲克牌遊戲出了點小狀況\n"
+            "====================\n"
+            "🔧 請稍後再試試看"
+        )
+
 @app.route("/")
 def home():
     return "LINE Reminder Bot is running."
@@ -67,6 +143,8 @@ def send_help_message():
         "• 本月行程 - 查看本月的所有行程\n"
         "• 下個月行程 - 查看下個月的所有行程\n"
         "• 明年行程 - 查看明年的所有行程\n\n"
+        "🎴 撲克牌遊戲：\n"
+        "• 出牌 - 隨機抽取5張撲克牌\n\n"
         "⏰ 倒數計時功能：\n"
         "• 倒數3分鐘 / 倒數計時 / 開始倒數\n"
         "• 倒數5分鐘\n\n"
@@ -201,6 +279,7 @@ EXACT_MATCHES = {
     "開始倒數": "countdown_3",
     "倒數3分鐘": "countdown_3",
     "倒數5分鐘": "countdown_5",
+    "出牌": "poker_draw",
     "哈囉": "hello",
     "hi": "hi",
     "你還會說什麼?": "what_else"
@@ -297,6 +376,8 @@ def handle_message(event):
             reply = "呷飽沒?"
         elif reply_type == "what_else":
             reply = "我愛你❤️"
+        elif reply_type == "poker_draw":
+            reply = handle_poker_draw(user_id)
         elif reply_type == "countdown_3":
             reply = "倒數計時3分鐘開始...\n（3分鐘後我會提醒你：3分鐘已到）"
             scheduler.add_job(
@@ -488,6 +569,8 @@ if __name__ == "__main__":
     print("==============")
     print("📅 排程任務:")
     print("   • 每週五早上 10:00 發送2週後行程預覽")
+    print("🎴 撲克牌遊戲:")
+    print("   • 輸入 '出牌' 隨機抽取5張撲克牌")
     print("⏰ 倒數計時功能:")
     print("   • 倒數3分鐘：輸入 '倒數3分鐘' 或 '倒數計時' 或 '開始倒數'")
     print("   • 倒數5分鐘：輸入 '倒數5分鐘'")
